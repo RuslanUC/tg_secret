@@ -167,12 +167,31 @@ class SQLiteStorage(BaseStorage):
         if len(fields) == 1:
             return
 
-        fields_str = ", ".join([f"`{field_name}`" for field_name in fields])
-        params_str = ", ".join(["?" for _ in fields])
+        if await self.get_chat(chat_id) is None:
+            fields_str = ", ".join([f"`{field_name}`" for field_name in fields])
+            params_str = ", ".join(["?" for _ in fields])
+            self.conn.execute(
+                f"INSERT INTO `secret_chats`({fields_str}) VALUES ({params_str});", tuple(params)
+            )
+        else:
+            fields_str = ", ".join([f"`{field_name}`=?" for field_name in fields[1:]])
+            self.conn.execute(
+                f"UPDATE `secret_chats` SET {fields_str} WHERE `id`=?;", (*params[1:], params[0])
+            )
 
-        self.conn.execute(
-            f"REPLACE INTO `secret_chats`({fields_str}) VALUES ({params_str});", tuple(params)
-        )
+    async def inc_chat_in_seq_no(self, chat_id: int) -> int:
+        with self.conn:
+            chat = await self.get_chat(chat_id)
+            await self.set_chat(chat_id, in_seq_no=chat.in_seq_no + 1)
+
+        return chat.in_seq_no
+
+    async def inc_chat_out_seq_no(self, chat_id: int) -> int:
+        with self.conn:
+            chat = await self.get_chat(chat_id)
+            await self.set_chat(chat_id, out_seq_no=chat.out_seq_no + 1)
+
+        return chat.out_seq_no
 
     async def get_chat(self, chat_id: int) -> SecretChat | None:
         cursor = self.conn.execute("SELECT * FROM `secret_chats` WHERE `id`=?;", (chat_id,))
@@ -180,7 +199,8 @@ class SQLiteStorage(BaseStorage):
         if not row:
             return None
 
-        return SecretChat(**dict(zip(row.keys(), row)))
+        cols = next(zip(*cursor.description))
+        return SecretChat(**dict(zip(cols, row)))
 
     async def delete_chat(self, chat_id: int) -> None:
         self.conn.execute("DELETE FROM `secret_chats` WHERE `id`=?;", (chat_id,))
@@ -190,12 +210,12 @@ class SQLiteStorage(BaseStorage):
             result = self.conn.execute(
                 "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? ORDER BY `id` DESC LIMIT 1",
                 (chat_id,)
-            )
+            ).fetchone()
         else:
             result = self.conn.execute(
                 "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? AND `fingerprint_hex`=?",
                 (chat_id, fingerprint.hex(),)
-            )
+            ).fetchone()
 
         return result if result else None
 

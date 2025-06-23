@@ -207,7 +207,7 @@ class TelegramSecretClient:
             peer_layer=0,
             this_layer=layer,
             in_seq_no=0,
-            out_seq_no=1,
+            out_seq_no=0,
         )
 
         await self._storage.add_key(new_chat.id, key)
@@ -232,6 +232,10 @@ class TelegramSecretClient:
             )
         )
 
+    @staticmethod
+    def _gen_in_out_seq_no(seq_no: int, out: bool, originator: bool):
+        return seq_no * 2 + (1 if out == originator else 0)
+
     # TODO: SendEncryptedFile
     async def _send_message(self, chat_id: int, decrypted_message: SecretTLObject) -> None:
         # TODO: check if state is READY
@@ -239,21 +243,21 @@ class TelegramSecretClient:
         key_id, key, _ = await self._storage.get_key(chat.id)
 
         await self._storage.inc_key(key_id)
-        await self._storage.set_chat(chat_id, out_seq_no=chat.out_seq_no + 1)
+        old_out_seq = await self._storage.inc_chat_out_seq_no(chat_id)
 
         message_to_encrypt = DecryptedMessageLayer(
             random_bytes=urandom(randint(16, 32)),
             layer=min(chat.this_layer, max(46, chat.peer_layer)),
-            in_seq_no=chat.in_seq_no,
-            out_seq_no=chat.out_seq_no,
+            in_seq_no=self._gen_in_out_seq_no(chat.in_seq_no, False, chat.originator),
+            out_seq_no=self._gen_in_out_seq_no(old_out_seq, True, chat.originator),
             message=decrypted_message,
         ).write()
-
         to_encrypt = (
             Int(len(message_to_encrypt))
             + message_to_encrypt
-            + urandom(randint(12, 1024) // 4 * 4)
+            + urandom(randint(12, 512) // 4 * 4)
         )
+        to_encrypt += b"\x00" * (-len(to_encrypt) % 16)
 
         msg_key = msg_key_v2(key, to_encrypt, chat.originator)
         aes_key, aes_iv = kdf_v2(key, msg_key, chat.originator)
@@ -311,7 +315,7 @@ class TelegramSecretClient:
 
         # TODO: check if state is READY
         chat = await self._storage.get_chat(chat_id)
-        key_id, key, _ = await self._storage.get_key(chat.id)
+        key_id, key, _ = await self._storage.get_key(chat.id, data[:8])
 
         key_fingerprint = sha1(key).digest()[-8:]
         if data[:8] != key_fingerprint:
@@ -335,10 +339,10 @@ class TelegramSecretClient:
         if not isinstance(obj, DecryptedMessageLayer):
             return
 
-        await self._storage.inc_key(key_id)
-
         # TODO: check seq_no
-        # TODO: save seq_no
+
+        await self._storage.inc_key(key_id)
+        await self._storage.inc_chat_in_seq_no(chat_id)
 
         if is_service:
             if not isinstance(obj.message, decrypted_message_service_clss):
@@ -394,7 +398,20 @@ class TelegramSecretClient:
             self, chat_id: int,
             message: DecryptedMessage_8 | DecryptedMessage_17 | DecryptedMessage_45 | DecryptedMessage_73,
     ) -> None:
-        ...
+        print(f"{chat_id}: {message.message}")
+        await self.send_text_message(chat_id, message.message)
+
+    # TODO: return message object
+    # TODO: allow sending by user id
+    async def send_text_message(self, chat_id: int, text: str) -> None:
+        await self._send_message(
+            chat_id,
+            DecryptedMessage_73(
+                random_id=int.from_bytes(urandom(8), "little", signed=True),
+                message=text,
+                ttl=0,
+            )
+        )
 
 
 
