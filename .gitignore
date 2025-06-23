@@ -4,3 +4,5 @@ __pycache__
 *.session-*
 *.secret-session
 *.secret-session-*
+
+/main.py
