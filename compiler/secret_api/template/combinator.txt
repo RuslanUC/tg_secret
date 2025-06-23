@@ -1,0 +1,23 @@
+class {name}(SecretTLObject):  # type: ignore
+    """{docstring}
+    """
+
+    __slots__: list[str] = [{slots}]
+
+    ID = {id}
+    QUALNAME = "{qualname}"
+
+    def __init__(self{arguments}) -> None:
+        {fields}
+
+    @staticmethod
+    def read(b: BytesIO, *args) -> {name}:
+        {read_types}
+        return {name}({return_arguments})
+
+    def write(self) -> bytes:
+        b = BytesIO()
+        b.write(Int(self.ID, False))
+
+        {write_types}
+        return b.getvalue()
