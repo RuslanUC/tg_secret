@@ -27,6 +27,11 @@ migrations = [
         `admin_id` BIGINT NOT NULL,
         `participant_id` BIGINT NOT NULL,
         `state` INTEGER NOT NULL,
+        `originator` BOOLEAN NOT NULL,
+        `peer_layer` INTEGER NOT NULL,
+        `this_layer` INTEGER NOT NULL,
+        `in_seq_no` BIGINT NOT NULL,
+        `out_seq_no` BIGINT NOT NULL,
         `encryption_key` BLOB(256) DEFAULT NULL
     );
     """,
@@ -90,7 +95,7 @@ class SQLiteStorage(BaseStorage):
             "SELECT `version` FROM `dh_config` WHERE `_id`=1;"
         ).fetchone()
 
-        return version if version else 0
+        return version[0] if version else 0
 
     async def get_dh_values(self) -> tuple[bytes, int] | tuple[None, None]:
         values = self.conn.execute(
@@ -106,6 +111,11 @@ class SQLiteStorage(BaseStorage):
             admin_id: int | None = None,
             participant_id: int | None = None,
             state: ChatState | None = None,
+            originator: bool | None = None,
+            peer_layer: int | None = None,
+            this_layer: int | None = None,
+            in_seq_no: int | None = None,
+            out_seq_no: int | None = None,
             encryption_key: bytes | None = None,
     ) -> None:
         fields = ["id"]
@@ -126,6 +136,21 @@ class SQLiteStorage(BaseStorage):
         if state is not None:
             fields.append("state")
             params.append(state)
+        if originator is not None:
+            fields.append("originator")
+            params.append(originator)
+        if peer_layer is not None:
+            fields.append("peer_layer")
+            params.append(peer_layer)
+        if this_layer is not None:
+            fields.append("this_layer")
+            params.append(this_layer)
+        if in_seq_no is not None:
+            fields.append("in_seq_no")
+            params.append(in_seq_no)
+        if out_seq_no is not None:
+            fields.append("out_seq_no")
+            params.append(out_seq_no)
         if encryption_key is not None:
             fields.append("encryption_key")
             params.append(encryption_key)
@@ -140,9 +165,9 @@ class SQLiteStorage(BaseStorage):
             f"REPLACE INTO `secret_chats`({fields_str}) VALUES ({params_str});", tuple(params)
         )
 
-    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bytes | None] | None:
+    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bool, int, int, int, int, bytes | None] | None:
         values = self.conn.execute(
-            "SELECT `hash`, `date`, `admin_id`, `participant_id`, `state`, `encryption_key` "
+            "SELECT `hash`, `date`, `admin_id`, `participant_id`, `state`, `originator`, `peer_layer`, `this_layer`, `in_seq_no`, `out_seq_no`, `encryption_key` "
             "FROM `secret_chats` "
             "WHERE `id`=?;",
             (chat_id,)

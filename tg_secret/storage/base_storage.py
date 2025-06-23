@@ -40,12 +40,17 @@ class BaseStorage(ABC):
             admin_id: int | None = None,
             participant_id: int | None = None,
             state: ChatState | None = None,
+            originator: bool | None = None,
+            peer_layer: int | None = None,
+            this_layer: int | None = None,
+            in_seq_no: int | None = None,
+            out_seq_no: int | None = None,
             encryption_key: bytes | None = None,
     ) -> None:
         ...
 
     @abstractmethod
-    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bytes]:
+    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bool, int, int, int, int, bytes]:
         ...
 
     @abstractmethod
