@@ -1,9 +1,28 @@
 [tool.poetry]
 name = "tg-secret"
 version = "0.1.0"
-description = ""
+description = "Secret chats support for pyrogram"
 authors = ["RuslanUC <dev_ruslan_uc@protonmail.com>"]
 readme = "README.md"
+license = "MIT"
+classifiers = [
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Topic :: Internet",
+]
+
+[tool.poetry.urls]
+Homepage = "https://github.com/RuslanUC/tg_secret"
+Repository = "https://github.com/RuslanUC/tg_secret"
 
 [tool.poetry.dependencies]
 python = "^3.11"
