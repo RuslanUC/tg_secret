@@ -1,7 +1,9 @@
 import sqlite3
 from abc import abstractmethod
+from hashlib import sha1
+from time import time
 
-from .base_storage import BaseStorage
+from .base_storage import BaseStorage, SecretChat
 from ..enums import ChatState
 
 migrations = [
@@ -31,10 +33,21 @@ migrations = [
         `peer_layer` INTEGER NOT NULL,
         `this_layer` INTEGER NOT NULL,
         `in_seq_no` BIGINT NOT NULL,
-        `out_seq_no` BIGINT NOT NULL,
-        `encryption_key` BLOB(256) DEFAULT NULL
+        `out_seq_no` BIGINT NOT NULL
     );
     """,
+    f"""
+    CREATE TABLE `encryption_keys`(
+        `id` BIGINT PRIMARY KEY,
+        `chat_id` BIGINT NOT NULL,
+        `fingerprint_hex` VARCHAR(16) NOT NULL,
+        `key` BLOB(256) DEFAULT NULL,
+        `created_at` BIGINT NOT NULL,
+        `used` INTEGER NOT NULL,
+        FOREIGN KEY (`chat_id`) REFERENCES `secret_chats`(`id`)
+    );
+    """,
+    # TODO: store messages (at least outgoing so they can be re-sent)
 ]
 
 
@@ -116,7 +129,6 @@ class SQLiteStorage(BaseStorage):
             this_layer: int | None = None,
             in_seq_no: int | None = None,
             out_seq_no: int | None = None,
-            encryption_key: bytes | None = None,
     ) -> None:
         fields = ["id"]
         params = [chat_id]
@@ -151,9 +163,6 @@ class SQLiteStorage(BaseStorage):
         if out_seq_no is not None:
             fields.append("out_seq_no")
             params.append(out_seq_no)
-        if encryption_key is not None:
-            fields.append("encryption_key")
-            params.append(encryption_key)
 
         if len(fields) == 1:
             return
@@ -165,15 +174,43 @@ class SQLiteStorage(BaseStorage):
             f"REPLACE INTO `secret_chats`({fields_str}) VALUES ({params_str});", tuple(params)
         )
 
-    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bool, int, int, int, int, bytes | None] | None:
-        values = self.conn.execute(
-            "SELECT `hash`, `date`, `admin_id`, `participant_id`, `state`, `originator`, `peer_layer`, `this_layer`, `in_seq_no`, `out_seq_no`, `encryption_key` "
-            "FROM `secret_chats` "
-            "WHERE `id`=?;",
-            (chat_id,)
-        ).fetchone()
+    async def get_chat(self, chat_id: int) -> SecretChat | None:
+        cursor = self.conn.execute("SELECT * FROM `secret_chats` WHERE `id`=?;", (chat_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
 
-        return values if values else None
+        return SecretChat(**dict(zip(row.keys(), row)))
 
     async def delete_chat(self, chat_id: int) -> None:
         self.conn.execute("DELETE FROM `secret_chats` WHERE `id`=?;", (chat_id,))
+
+    async def get_key(self, chat_id: int, fingerprint: bytes | None = None) -> tuple[int, bytes, int] | None:
+        if fingerprint is None:
+            result = self.conn.execute(
+                "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? ORDER BY `id` DESC LIMIT 1",
+                (chat_id,)
+            )
+        else:
+            result = self.conn.execute(
+                "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? AND `fingerprint_hex`=?",
+                (chat_id, fingerprint.hex(),)
+            )
+
+        return result if result else None
+
+    async def add_key(self, chat_id: int, key: bytes) -> None:
+        fingerprint = sha1(key).digest()[-8:]
+        self.conn.execute(
+            f"INSERT INTO `encryption_keys`(`chat_id`, `fingerprint_hex`, `key`, `created_at`, `used`) VALUES (?, ?, ?, ?, ?);",
+            (chat_id, fingerprint.hex(), key, int(time()), 0,)
+        )
+
+    async def inc_key(self, key_id: int) -> None:
+        self.conn.execute(
+            f"UPDATE `encryption_keys` SET `used`=`used`+1 WHERE `id`=?",
+            (key_id,)
+        )
+
+    async def delete_key(self, key_id: int) -> None:
+        self.conn.execute("DELETE FROM `encryption_keys` WHERE `id`=?;", (key_id,))

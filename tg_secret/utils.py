@@ -1,6 +1,7 @@
 from hashlib import sha256
 
-# TODO: also support mtproto v1.0 kdf
+# TODO: also support mtproto v1.0 kdf:
+#  https://core.telegram.org/api/end-to-end_v1#serialization-and-encryption-of-outgoing-messages
 
 
 def kdf_v2(key: bytes, msg_key: bytes, from_originator: bool) -> tuple[bytes, bytes]:

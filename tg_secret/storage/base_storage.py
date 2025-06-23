@@ -3,6 +3,39 @@ from abc import ABC, abstractmethod
 from tg_secret.enums import ChatState
 
 
+class SecretChat:
+    __slots__ = (
+        "id", "hash", "date", "admin_id", "participant_id", "state", "originator", "peer_layer", "this_layer",
+        "in_seq_no", "out_seq_no",
+    )
+
+    def __init__(
+            self,
+            id: int,
+            hash: int,
+            date: int,
+            admin_id: int,
+            participant_id: int,
+            state: int,
+            originator: bool,
+            peer_layer: int,
+            this_layer: int,
+            in_seq_no: int,
+            out_seq_no: int,
+    ) -> None:
+        self.id = id
+        self.hash = hash
+        self.date = date
+        self.admin_id = admin_id
+        self.participant_id = participant_id
+        self.state = ChatState(state)
+        self.originator = originator
+        self.peer_layer = peer_layer
+        self.this_layer = this_layer
+        self.in_seq_no = in_seq_no
+        self.out_seq_no = out_seq_no
+
+
 class BaseStorage(ABC):
     @abstractmethod
     async def open(self) -> None:
@@ -45,14 +78,29 @@ class BaseStorage(ABC):
             this_layer: int | None = None,
             in_seq_no: int | None = None,
             out_seq_no: int | None = None,
-            encryption_key: bytes | None = None,
     ) -> None:
         ...
 
     @abstractmethod
-    async def get_chat(self, chat_id: int) -> tuple[int, int, int, int, ChatState, bool, int, int, int, int, bytes]:
+    async def get_chat(self, chat_id: int) -> SecretChat | None:
         ...
 
     @abstractmethod
     async def delete_chat(self, chat_id: int) -> None:
+        ...
+
+    @abstractmethod
+    async def get_key(self, chat_id: int, fingerprint: bytes) -> tuple[int, bytes, int] | None:
+        ...
+
+    @abstractmethod
+    async def add_key(self, chat_id: int, key: bytes) -> None:
+        ...
+
+    @abstractmethod
+    async def inc_key(self, key_id: int) -> None:
+        ...
+
+    @abstractmethod
+    async def delete_key(self, key_id: int) -> None:
         ...
