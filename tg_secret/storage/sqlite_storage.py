@@ -3,7 +3,7 @@ from abc import abstractmethod
 from hashlib import sha1
 from time import time
 
-from .base_storage import BaseStorage, SecretChat
+from .base_storage import BaseStorage, SecretChat, EncryptionKey, DhConfig
 from ..enums import ChatState
 
 migrations = [
@@ -15,10 +15,10 @@ migrations = [
     """,
     f"""
     CREATE TABLE `dh_config`(
-        `_id` INTEGER PRIMARY KEY,
-        `version` BIGINT,
-        `p` BLOB(256),
-        `g` BIGINT
+        `version` BIGINT PRIMARY KEY,
+        `date` BIGINT NOT NULL,
+        `p` BLOB(256) NOT NULL,
+        `g` BIGINT NOT NULL
     );
     """,
     f"""
@@ -33,7 +33,9 @@ migrations = [
         `peer_layer` INTEGER NOT NULL,
         `this_layer` INTEGER NOT NULL,
         `in_seq_no` BIGINT NOT NULL,
-        `out_seq_no` BIGINT NOT NULL
+        `out_seq_no` BIGINT NOT NULL,
+        `dh_config_version` BIGINT DEFAULT NULL,
+        FOREIGN KEY (`dh_config_version`) REFERENCES `dh_config`(`version`)
     );
     """,
     f"""
@@ -44,6 +46,8 @@ migrations = [
         `key` BLOB(256) DEFAULT NULL,
         `created_at` BIGINT NOT NULL,
         `used` INTEGER NOT NULL,
+        `a` BLOB(256) DEFAULT NULL,
+        `exchange_id` BIGINT DEFAULT NULL,
         FOREIGN KEY (`chat_id`) REFERENCES `secret_chats`(`id`)
     );
     """,
@@ -97,25 +101,32 @@ class SQLiteStorage(BaseStorage):
     async def delete(self) -> None:
         ...
 
-    async def set_dh_values(self, version: int, p: bytes, g: int) -> None:
-        self.conn.execute(
-            "REPLACE INTO `dh_config`(`_id`, `version`, `p`, `g`) VALUES (1, ?, ?, ?)",
-            (version, p, g,)
-        )
+    async def get_dh_config(self, version: int | None) -> DhConfig | None:
+        if version is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM `dh_config` WHERE `version`=?",
+                (version,)
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM `dh_config` ORDER BY `date` DESC LIMIT 1",
+            )
 
-    async def get_dh_version(self) -> int:
-        version = self.conn.execute(
-            "SELECT `version` FROM `dh_config` WHERE `_id`=1;"
-        ).fetchone()
+        row = cursor.fetchone()
+        if not row:
+            return None
 
-        return version[0] if version else 0
+        cols = next(zip(*cursor.description))
+        return DhConfig(**dict(zip(cols, row)))
 
-    async def get_dh_values(self) -> tuple[bytes, int] | tuple[None, None]:
-        values = self.conn.execute(
-            "SELECT `p`, `g` FROM `dh_config` WHERE `_id`=1;"
-        ).fetchone()
-
-        return values if values else (None, None)
+    async def set_dh_config(self, version: int, p: bytes, g: int) -> None:
+        if await self.get_dh_config(version) is not None:
+            self.conn.execute("UPDATE `dh_config` SET `date`=? WHERE `version`=?;", (int(time()), version,))
+        else:
+            self.conn.execute(
+                "INSERT INTO `dh_config`(`version`, `date`, `p`, `g`) VALUES (?, ?, ?, ?)",
+                (version, int(time()), p, g,)
+            )
 
     async def set_chat(
             self, chat_id: int, *,
@@ -129,6 +140,7 @@ class SQLiteStorage(BaseStorage):
             this_layer: int | None = None,
             in_seq_no: int | None = None,
             out_seq_no: int | None = None,
+            dh_config_version: int | None = None,
     ) -> None:
         fields = ["id"]
         params = [chat_id]
@@ -163,6 +175,9 @@ class SQLiteStorage(BaseStorage):
         if out_seq_no is not None:
             fields.append("out_seq_no")
             params.append(out_seq_no)
+        if dh_config_version is not None:
+            fields.append("dh_config_version")
+            params.append(dh_config_version)
 
         if len(fields) == 1:
             return
@@ -205,25 +220,93 @@ class SQLiteStorage(BaseStorage):
     async def delete_chat(self, chat_id: int) -> None:
         self.conn.execute("DELETE FROM `secret_chats` WHERE `id`=?;", (chat_id,))
 
-    async def get_key(self, chat_id: int, fingerprint: bytes | None = None) -> tuple[int, bytes, int] | None:
-        if fingerprint is None:
-            result = self.conn.execute(
-                "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? ORDER BY `id` DESC LIMIT 1",
-                (chat_id,)
-            ).fetchone()
-        else:
-            result = self.conn.execute(
-                "SELECT `id`, `key`, `used` FROM `encryption_keys` WHERE `chat_id`=? AND `fingerprint_hex`=?",
+    async def get_key(
+            self, chat_id: int, fingerprint: bytes | None = None, key_id: int | None = None,
+            exchange_id: int | None = None,
+    ) -> EncryptionKey | None:
+        if key_id is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM `encryption_keys` WHERE `chat_id`=? AND `id`=?",
+                (chat_id, key_id,)
+            )
+        elif exchange_id is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM `encryption_keys` WHERE `chat_id`=? AND `exchange_id`=?",
+                (chat_id, exchange_id,)
+            )
+        elif fingerprint is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM `encryption_keys` WHERE `chat_id`=? AND `fingerprint_hex`=?",
                 (chat_id, fingerprint.hex(),)
-            ).fetchone()
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM `encryption_keys` WHERE `chat_id`=? AND `key` IS NOT NULL ORDER BY `id` DESC LIMIT 1",
+                (chat_id,)
+            )
 
-        return result if result else None
+        row = cursor.fetchone()
+        if not row:
+            return None
 
-    async def add_key(self, chat_id: int, key: bytes) -> None:
-        fingerprint = sha1(key).digest()[-8:]
+        cols = next(zip(*cursor.description))
+        return EncryptionKey(**dict(zip(cols, row)))
+
+    async def add_key(
+            self, chat_id: int, key: bytes | None = None, a: bytes | None = None, exchange_id: int | None = None,
+    ) -> None:
+        if key is not None:
+            fingerprint = sha1(key).digest()[-8:]
+            self.conn.execute(
+                f"INSERT INTO `encryption_keys`(`chat_id`, `fingerprint_hex`, `key`, `created_at`, `used`) VALUES (?, ?, ?, ?, ?);",
+                (chat_id, fingerprint.hex(), key, int(time()), 0,)
+            )
+        elif a is not None and exchange_id is not None:
+            self.conn.execute(
+                f"INSERT INTO `encryption_keys`(`chat_id`, `fingerprint_hex`, `created_at`, `used`, `a`, `exchange_id`) VALUES (?, ?, ?, ?, ?, ?);",
+                (chat_id, key, int(time()), 0, a, exchange_id,)
+            )
+
+    async def update_key(
+            self, key_id: int, *,
+            fingerprint_hex: str | None = None,
+            key: bytes | None = None,
+            created_at: int | None = None,
+            used: int | None = None,
+            a: bytes | None = None,
+            exchange_id: int | None = None,
+    ) -> None:
+        fields = []
+        params = []
+
+        if fingerprint_hex is not None:
+            fields.append("fingerprint_hex")
+            params.append(fingerprint_hex)
+        if key is not None:
+            fields.append("key")
+            params.append(key if key else None)
+        if created_at is not None:
+            fields.append("created_at")
+            params.append(created_at)
+        if used is not None:
+            fields.append("used")
+            params.append(used)
+        if a is not None:
+            fields.append("a")
+            params.append(a if a else None)
+        if exchange_id is not None:
+            fields.append("exchange_id")
+            params.append(exchange_id if exchange_id else None)
+
+        if not fields:
+            return
+
+        fields_str = ", ".join([f"`{field_name}`=?" for field_name in fields])
+        fields.append("id")
+        params.append(key_id)
+
         self.conn.execute(
-            f"INSERT INTO `encryption_keys`(`chat_id`, `fingerprint_hex`, `key`, `created_at`, `used`) VALUES (?, ?, ?, ?, ?);",
-            (chat_id, fingerprint.hex(), key, int(time()), 0,)
+            f"UPDATE `encryption_keys` SET {fields_str} WHERE `id`=?;", tuple(params)
         )
 
     async def inc_key(self, key_id: int) -> None:
