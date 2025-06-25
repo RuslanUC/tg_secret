@@ -14,13 +14,13 @@ from pyrogram.methods.utilities.idle import idle
 from pyrogram.raw.core import Int, Long
 from pyrogram.raw.functions.messages import DiscardEncryption, GetDhConfig, AcceptEncryption, SendEncryptedService, \
     SendEncrypted
-from pyrogram.raw.types import User, UpdateEncryption, EncryptedChatRequested, InputEncryptedChat, EncryptedChat, \
-    EncryptedChatDiscarded, UpdateNewEncryptedMessage, EncryptedMessageService, EncryptedMessage
 from pyrogram.raw.types import MessageEntityBold as PyroEntityBold, MessageEntityItalic as PyroEntityItalic, \
     MessageEntityUnderline as PyroEntityUnderline, MessageEntityStrike as PyroEntityStrike, \
     MessageEntityBlockquote as PyroEntityBlockquote, MessageEntityCode as PyroEntityCode, \
     MessageEntityPre as PyroEntityPre, MessageEntitySpoiler as PyroEntitySpoiler, \
     MessageEntityTextUrl as PyroEntityTextUrl, MessageEntityCustomEmoji as PyroEntityCustomEmoji
+from pyrogram.raw.types import User, UpdateEncryption, EncryptedChatRequested, InputEncryptedChat, EncryptedChat, \
+    EncryptedChatDiscarded, UpdateNewEncryptedMessage, EncryptedMessageService, EncryptedMessage
 from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
 from tgcrypto import ige256_encrypt, ige256_decrypt
 
@@ -47,10 +47,14 @@ if TYPE_CHECKING:
 
 # TODO: replace client.log_out to also remove secret database file
 # TODO: allow using same session file as pyrogram
-# TODO: wrap EncryptedChat into class that stores user/chat info not in raw format, adds methods like ".send_message", etc.
+# TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
 
 ChatRequestFuncT = Callable[[EncryptedChatRequested, User], Awaitable[ChatRequestResult]]
-ChatReadyFuncT = Callable[[EncryptedChat], Awaitable[Any]]
+ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
+NewMessageFuncT = Callable[[SecretMessage], Awaitable[Any]]
+MessagesDeletedFuncT = Callable[[TypesSecretChat, list[int]], Awaitable[Any]]
+ChatDeletedFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
+HistoryDeletedFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
 
 decrypted_message_clss = (DecryptedMessage_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73)
 decrypted_message_service_clss = (DecryptedMessageService_8, DecryptedMessageService_17)
@@ -62,7 +66,7 @@ class TelegramSecretClient:
             client: Client,
             session_name: str | None = None,
             workdir: Path | None = None,
-            in_memory: bool = False
+            in_memory: bool = False,
     ) -> None:
         self._client = client
         self._name = session_name or client.name
@@ -79,6 +83,10 @@ class TelegramSecretClient:
 
         self._on_requested_handlers: list[ChatRequestFuncT] = []
         self._on_ready_handlers: list[ChatReadyFuncT] = []
+        self._on_new_message_handlers: list[NewMessageFuncT] = []
+        self._on_messages_deleted_handlers: list[MessagesDeletedFuncT] = []
+        self._on_chat_deleted_handlers: list[ChatDeletedFuncT] = []
+        self._on_history_deleted_handlers: list[HistoryDeletedFuncT] = []
 
     def add_request_handler(self, func: ChatRequestFuncT) -> None:
         self._on_requested_handlers.append(func)
@@ -92,6 +100,34 @@ class TelegramSecretClient:
 
     def on_chat_ready(self, func: ChatReadyFuncT) -> ChatReadyFuncT:
         self.add_chat_ready_handler(func)
+        return func
+
+    def add_new_message_handler(self, func: NewMessageFuncT) -> None:
+        self._on_new_message_handlers.append(func)
+
+    def on_new_message(self, func: NewMessageFuncT) -> NewMessageFuncT:
+        self.add_new_message_handler(func)
+        return func
+
+    def add_messages_deleted_handler(self, func: MessagesDeletedFuncT) -> None:
+        self._on_messages_deleted_handlers.append(func)
+
+    def on_messages_deleted(self, func: MessagesDeletedFuncT) -> MessagesDeletedFuncT:
+        self.add_messages_deleted_handler(func)
+        return func
+
+    def add_chat_deleted_handler(self, func: ChatDeletedFuncT) -> None:
+        self._on_chat_deleted_handlers.append(func)
+
+    def on_chat_deleted(self, func: ChatDeletedFuncT) -> ChatDeletedFuncT:
+        self.add_chat_deleted_handler(func)
+        return func
+
+    def add_history_deleted_handler(self, func: HistoryDeletedFuncT) -> None:
+        self._on_history_deleted_handlers.append(func)
+
+    def on_history_deleted(self, func: HistoryDeletedFuncT) -> HistoryDeletedFuncT:
+        self.add_history_deleted_handler(func)
         return func
 
     async def start(self) -> None:
@@ -145,7 +181,11 @@ class TelegramSecretClient:
                 elif result is ChatRequestResult.DISCARD:
                     await self.discard_chat(chat.id)
         elif isinstance(chat, EncryptedChatDiscarded):
+            secret_chat = await self.get_chat(chat.id)
             await self._storage.delete_chat(chat.id)
+
+            for handler in self._on_chat_deleted_handlers:
+                self._client.loop.create_task(handler(secret_chat))
 
     async def _check_and_set_dh_values(self, version: int, p: bytes, g: int) -> None:
         dh_prime = int.from_bytes(p, "big")
@@ -237,8 +277,9 @@ class TelegramSecretClient:
 
         await self._notify_about_layer(new_chat.id)
 
+        secret_chat = await self.get_chat(new_chat.id)
         for handler in self._on_ready_handlers:
-            await handler(new_chat)
+            self._client.loop.create_task(handler(secret_chat))
 
     async def discard_chat(self, chat_id: int) -> None:
         await self._client.invoke(DiscardEncryption(chat_id=chat_id))
@@ -385,7 +426,6 @@ class TelegramSecretClient:
                 f"Expected EncryptedMessage or EncryptedMessageService, got {update.message.__class__.__name__}"
             )
 
-        # TODO: check if state is READY
         chat = await self._storage.get_chat(chat_id)
         key_fp = int.from_bytes(data[:8], "little", signed=True)
         key = await self._get_or_switch_chat_key(chat, key_fp)
@@ -529,9 +569,13 @@ class TelegramSecretClient:
         elif isinstance(action, DecryptedMessageActionAbortKey):
             await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
         elif isinstance(action, DecryptedMessageActionDeleteMessages):
-            ...
+            secret_chat = await self.get_chat(chat.id)
+            for handler in self._on_messages_deleted_handlers:
+                self._client.loop.create_task(handler(secret_chat, action.random_ids))
         elif isinstance(action, DecryptedMessageActionFlushHistory):
-            ...
+            secret_chat = await self.get_chat(chat.id)
+            for handler in self._on_history_deleted_handlers:
+                self._client.loop.create_task(handler(secret_chat))
         elif isinstance(action, DecryptedMessageActionNoop):
             ...
         elif isinstance(action, DecryptedMessageActionNotifyLayer):
@@ -555,9 +599,26 @@ class TelegramSecretClient:
             self, chat_id: int,
             message: DecryptedMessage_8 | DecryptedMessage_17 | DecryptedMessage_45 | DecryptedMessage_73,
     ) -> None:
-        chat = await self._storage.get_chat(chat_id)
-        print(f"{chat_id} ({chat.key_fp}): {message.message}")
-        await self.send_text_message(chat_id, f"**{message.message}**", parse_mode=ParseMode.MARKDOWN)
+        if isinstance(message, (DecryptedMessage_73, DecryptedMessage_45)):
+            reply_to = message.reply_to_random_id
+            entities = message.entities
+        else:
+            reply_to = None
+            entities = []
+
+        secret_chat = await self.get_chat(chat_id)
+        new_message = SecretMessage(
+            random_id=message.random_id,
+            chat=secret_chat,
+            from_id=secret_chat.peer_id,
+            text=message.message,
+            entities=entities,
+            reply_to_random_id=reply_to,
+            _client=self,
+        )
+
+        for handler in self._on_new_message_handlers:
+            self._client.loop.create_task(handler(new_message))
 
     async def get_chat(self, chat_id: int) -> TypesSecretChat | None:
         chat = await self._storage.get_chat(chat_id)
@@ -658,6 +719,7 @@ class TelegramSecretClient:
                 reply_to_random_id=reply_to_message_id,
             )
         elif chat.peer_layer >= 17:
+            reply_to_message_id = None
             request = DecryptedMessage_17(
                 random_id=random_id,
                 message=message,
@@ -665,6 +727,7 @@ class TelegramSecretClient:
                 media=DecryptedMessageMediaEmpty(),
             )
         elif chat.peer_layer >= 8:
+            reply_to_message_id = None
             request = DecryptedMessage_8(
                 random_id=random_id,
                 message=message,
@@ -682,5 +745,6 @@ class TelegramSecretClient:
             from_id=chat.admin_id if chat.originator else chat.participant_id,
             text=message,
             entities=entities,
+            reply_to_random_id=reply_to_message_id,
             _client=self,
         )

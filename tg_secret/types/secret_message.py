@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pyrogram.enums import ParseMode
+
 from tg_secret.raw.base import MessageEntity
 
 if TYPE_CHECKING:
@@ -10,8 +12,10 @@ if TYPE_CHECKING:
 
 class SecretMessage:
     # TODO: convert entities to pyrogram entities
+    # TODO: media
     def __init__(
             self, random_id: int, chat: SecretChat, from_id: int, text: str, entities: list[MessageEntity],
+            reply_to_random_id: int | None,
             *, _client: TelegramSecretClient,
     ):
         self.id = random_id
@@ -19,10 +23,21 @@ class SecretMessage:
         self.from_id = from_id
         self.text = text
         self.entities = entities
+        self.reply_to_id = reply_to_random_id
         self._client = _client
 
     async def delete(self) -> None:
         ...  # TODO: delete message
 
-    async def reply(self, ) -> SecretMessage:
-        ...  # TODO: reply to message
+    async def reply(
+            self,
+            text: str,
+            ttl: int = 0,
+            disable_web_page_preview: bool = False,
+            disable_notification: bool = False,
+            via_bot_name: str | None = None,
+            parse_mode: ParseMode | None = None,
+    ) -> SecretMessage:
+        return await self.chat.send_message(
+            text, ttl, disable_web_page_preview, disable_notification, via_bot_name, self.id, parse_mode,
+        )
