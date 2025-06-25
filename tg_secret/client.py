@@ -8,6 +8,7 @@ from random import randint
 from time import time
 from typing import TYPE_CHECKING, Awaitable, Any, Callable, cast
 
+from pyrogram.enums import ParseMode
 from pyrogram.errors import SecurityCheckMismatch
 from pyrogram.methods.utilities.idle import idle
 from pyrogram.raw.core import Int, Long
@@ -15,19 +16,30 @@ from pyrogram.raw.functions.messages import DiscardEncryption, GetDhConfig, Acce
     SendEncrypted
 from pyrogram.raw.types import User, UpdateEncryption, EncryptedChatRequested, InputEncryptedChat, EncryptedChat, \
     EncryptedChatDiscarded, UpdateNewEncryptedMessage, EncryptedMessageService, EncryptedMessage
+from pyrogram.raw.types import MessageEntityBold as PyroEntityBold, MessageEntityItalic as PyroEntityItalic, \
+    MessageEntityUnderline as PyroEntityUnderline, MessageEntityStrike as PyroEntityStrike, \
+    MessageEntityBlockquote as PyroEntityBlockquote, MessageEntityCode as PyroEntityCode, \
+    MessageEntityPre as PyroEntityPre, MessageEntitySpoiler as PyroEntitySpoiler, \
+    MessageEntityTextUrl as PyroEntityTextUrl, MessageEntityCustomEmoji as PyroEntityCustomEmoji
 from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
 from tgcrypto import ige256_encrypt, ige256_decrypt
 
 from .enums import ChatState, ChatRequestResult
+from .exceptions import SecretChatNotReadyException, SecretLayerException
 from .raw import SecretTLObject
 from .raw.all import layer
+from .raw.base import MessageEntity
 from .raw.types import DecryptedMessageService_17, DecryptedMessageActionNotifyLayer, DecryptedMessageLayer, \
     DecryptedMessageService_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73, DecryptedMessage_8, \
     DecryptedMessageActionAbortKey, DecryptedMessageActionAcceptKey, DecryptedMessageActionCommitKey, \
     DecryptedMessageActionDeleteMessages, DecryptedMessageActionFlushHistory, DecryptedMessageActionNoop, \
     DecryptedMessageActionReadMessages, DecryptedMessageActionRequestKey, DecryptedMessageActionResend, \
-    DecryptedMessageActionScreenshotMessages, DecryptedMessageActionSetMessageTTL, DecryptedMessageActionTyping
+    DecryptedMessageActionScreenshotMessages, DecryptedMessageActionSetMessageTTL, DecryptedMessageActionTyping, \
+    DecryptedMessageMediaEmpty, MessageEntityBold, MessageEntityItalic, MessageEntityUnderline, MessageEntityStrike, \
+    MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, MessageEntitySpoiler, MessageEntityTextUrl, \
+    MessageEntityCustomEmoji
 from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, SecretChat
+from .types import SecretChat as TypesSecretChat, SecretMessage
 from .utils import msg_key_v2, kdf_v2
 
 if TYPE_CHECKING:
@@ -131,7 +143,7 @@ class TelegramSecretClient:
                     await self._accept_chat(chat)
                     return
                 elif result is ChatRequestResult.DISCARD:
-                    await self._discard_chat(chat)
+                    await self.discard_chat(chat.id)
         elif isinstance(chat, EncryptedChatDiscarded):
             await self._storage.delete_chat(chat.id)
 
@@ -228,14 +240,14 @@ class TelegramSecretClient:
         for handler in self._on_ready_handlers:
             await handler(new_chat)
 
-    async def _discard_chat(self, chat: EncryptedChatRequested) -> None:
-        await self._client.invoke(DiscardEncryption(chat_id=chat.id))
-        await self._storage.delete_chat(chat.id)
+    async def discard_chat(self, chat_id: int) -> None:
+        await self._client.invoke(DiscardEncryption(chat_id=chat_id))
+        await self._storage.delete_chat(chat_id)
 
     async def _notify_about_layer(self, chat_id: int) -> None:
         await self._send_service_message(chat_id, DecryptedMessageActionNotifyLayer(layer=layer))
 
-    async def _init_rekeying(self, chat_id: int) -> None:
+    async def rekey(self, chat_id: int) -> None:
         chat = await self._storage.get_chat(chat_id)
         if chat.exchange_id is not None:
             return
@@ -253,12 +265,14 @@ class TelegramSecretClient:
 
     # TODO: properly annotate action
     async def _send_service_message(self, chat_id: int, action: SecretTLObject) -> None:
+        random_id = int.from_bytes(urandom(8), "little", signed=True)
         await self._send_message(
             chat_id,
             DecryptedMessageService_17(
-                random_id=int.from_bytes(urandom(8), "little", signed=True),
+                random_id=random_id,
                 action=action,
-            )
+            ),
+            random_id,
         )
 
     @staticmethod
@@ -287,12 +301,17 @@ class TelegramSecretClient:
 
     async def _maybe_start_rekeying(self, chat: SecretChat) -> None:
         if (chat.key_used > 100 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
-            await self._init_rekeying(chat.id)
+            await self.rekey(chat.id)
 
     # TODO: SendEncryptedFile
-    async def _send_message(self, chat_id: int, decrypted_message: SecretTLObject) -> None:
-        # TODO: check if state is READY
+    async def _send_message(
+            self, chat_id: int, decrypted_message: SecretTLObject, random_id: int, *,
+            silent: bool = False,
+    ) -> None:
         chat = await self._storage.get_chat(chat_id)
+        if chat.state is not ChatState.READY:
+            raise SecretChatNotReadyException
+
         key = await self._get_or_switch_chat_key(chat)
 
         await self._storage.update_chat(chat, key_used=chat.key_used + 1)
@@ -323,17 +342,15 @@ class TelegramSecretClient:
         if isinstance(decrypted_message, decrypted_message_service_clss):
             request = SendEncryptedService(
                 peer=peer,
-                # TODO: use same random_id as in decrypted_message
-                random_id=int.from_bytes(urandom(8), "little", signed=True),
+                random_id=random_id,
                 data=final_payload,
             )
         elif isinstance(decrypted_message, decrypted_message_clss):
             request = SendEncrypted(
                 peer=peer,
-                # TODO: use same random_id as in decrypted_message
-                random_id=int.from_bytes(urandom(8), "little", signed=True),
+                random_id=random_id,
                 data=final_payload,
-                # TODO: silent
+                silent=silent,
             )
         else:
             raise ValueError(
@@ -540,24 +557,130 @@ class TelegramSecretClient:
     ) -> None:
         chat = await self._storage.get_chat(chat_id)
         print(f"{chat_id} ({chat.key_fp}): {message.message}")
-        await self.send_text_message(chat_id, message.message)
+        await self.send_text_message(chat_id, f"**{message.message}**", parse_mode=ParseMode.MARKDOWN)
 
-    # TODO: return message object
-    # TODO: allow sending by user id
-    async def send_text_message(self, chat_id: int, text: str) -> None:
-        await self._send_message(
-            chat_id,
-            DecryptedMessage_73(
-                random_id=int.from_bytes(urandom(8), "little", signed=True),
-                message=text,
-                ttl=0,
-            )
+    async def get_chat(self, chat_id: int) -> TypesSecretChat | None:
+        chat = await self._storage.get_chat(chat_id)
+        if chat is None:
+            return None
+
+        return TypesSecretChat(
+            chat_id=chat.id,
+            peer_id=chat.participant_id if chat.originator else chat.admin_id,
+            originator=chat.originator,
+            created_at=chat.created_at,
+            sent_messages=chat.out_seq_no,
+            recv_messages=chat.in_seq_no,
+            state=chat.state,
+            _client=self,
         )
 
+    _pyrogram_entities_mapping = {
+        PyroEntityBold: MessageEntityBold,
+        PyroEntityItalic: MessageEntityItalic,
+        PyroEntityUnderline: MessageEntityUnderline,
+        PyroEntityStrike: MessageEntityStrike,
+        PyroEntityBlockquote: MessageEntityBlockquote,
+        PyroEntityCode: MessageEntityCode,
+        PyroEntityPre: MessageEntityPre,
+        PyroEntitySpoiler: MessageEntitySpoiler,
+        PyroEntityTextUrl: MessageEntityTextUrl,
+        PyroEntityCustomEmoji: MessageEntityCustomEmoji,
+    }
 
+    _entities_min_layers = {
+        MessageEntityUnderline: 144,
+        MessageEntityStrike: 144,
+        MessageEntityBlockquote: 144,
+        MessageEntitySpoiler: 144,
+        MessageEntityCustomEmoji: 144,
+    }
 
+    @classmethod
+    def _get_entities_with_layer(cls, entities: list[...], peer_layer: int) -> list[MessageEntity]:
+        if peer_layer < 45:
+            return []
 
+        result = []
+        for entity in entities:
+            secret_entity_cls = cls._pyrogram_entities_mapping.get(type(entity))
+            if secret_entity_cls is None:
+                continue
+            if cls._entities_min_layers.get(secret_entity_cls, 0) > peer_layer:
+                continue
 
+            kwargs = {}
+            for slot in entity.__slots__:
+                kwargs[slot] = getattr(entity, slot)
 
+            result.append(secret_entity_cls(**kwargs))
 
+        return result
 
+    # TODO: allow sending by user id
+    async def send_text_message(
+            self,
+            chat_id: int,
+            text: str,
+            ttl: int = 0,
+            disable_web_page_preview: bool = False,
+            disable_notification: bool = False,
+            via_bot_name: str | None = None,
+            reply_to_message_id: int | None = None,
+            parse_mode: ParseMode | None = None,
+    ) -> SecretMessage:
+        chat = await self._storage.get_chat(chat_id)
+        if chat.state is not ChatState.READY:
+            raise SecretChatNotReadyException
+
+        parse_result = await self._client.parser.parse(text, parse_mode)
+        message = parse_result["message"]
+        entities = self._get_entities_with_layer(parse_result["entities"], chat.peer_layer)
+
+        random_id = int.from_bytes(urandom(8), "little", signed=True)
+        if chat.peer_layer >= 73:
+            request = DecryptedMessage_73(
+                random_id=random_id,
+                message=message,
+                entities=entities or None,
+                ttl=ttl,
+                no_webpage=disable_web_page_preview,
+                via_bot_name=via_bot_name,
+                reply_to_random_id=reply_to_message_id,
+            )
+        elif chat.peer_layer >= 45:
+            request = DecryptedMessage_45(
+                random_id=random_id,
+                message=message,
+                entities=entities or None,
+                ttl=ttl,
+                via_bot_name=via_bot_name,
+                reply_to_random_id=reply_to_message_id,
+            )
+        elif chat.peer_layer >= 17:
+            request = DecryptedMessage_17(
+                random_id=random_id,
+                message=message,
+                ttl=ttl,
+                media=DecryptedMessageMediaEmpty(),
+            )
+        elif chat.peer_layer >= 8:
+            request = DecryptedMessage_8(
+                random_id=random_id,
+                message=message,
+                random_bytes=urandom(16),
+                media=DecryptedMessageMediaEmpty(),
+            )
+        else:
+            raise SecretLayerException("messages (?)", chat.peer_layer, 8)
+
+        await self._send_message(chat_id, request, random_id, silent=disable_notification)
+
+        return SecretMessage(
+            random_id=random_id,
+            chat=await self.get_chat(chat.id),
+            from_id=chat.admin_id if chat.originator else chat.participant_id,
+            text=message,
+            entities=entities,
+            _client=self,
+        )

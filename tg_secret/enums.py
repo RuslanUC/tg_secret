@@ -8,6 +8,9 @@ class ChatRequestResult(Enum):
 
 
 class ChatState(IntEnum):
+    # Incoming request
     REQUESTED = 1
+    # Outgoing request
     WAITING = 2
+    # Accepted chat
     READY = 3
