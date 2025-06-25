@@ -659,7 +659,7 @@ class TelegramSecretClient:
 
     @classmethod
     def _get_entities_with_layer(cls, entities: list[...], peer_layer: int) -> list[MessageEntity]:
-        if peer_layer < 45:
+        if peer_layer < 45 or not entities:
             return []
 
         result = []
