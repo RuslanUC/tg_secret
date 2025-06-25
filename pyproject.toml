@@ -26,11 +26,13 @@ Repository = "https://github.com/RuslanUC/tg_secret"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-tgcrypto = "^1.2.5"
 
 
 [tool.poetry.group.dev.dependencies]
 pyrogram = "^2.0.106"
+telethon = "^1.40.0"
+cryptg = "^0.5.0.post0"
+tgcrypto = "^1.2.5"
 
 [build-system]
 requires = ["poetry-core"]

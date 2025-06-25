@@ -6,26 +6,28 @@ Currently, following critical features are not implemented:
  - Proper gaps handling: if gaps were detected locally, they are just ignored; also DecryptedMessageActionResend is ignored, so if remote detected gaps, it won't be able to fill them
  - Media handling
  - Some security checks (check if dh_config.p is safe prime, inconsistent seq_no in terms of parity)
+ - Secret chats requesting
 
 
-### Example
+### Example with pyrogram
 ```python
 from pyrogram import Client
-from pyrogram.raw.types import EncryptedChatRequested, User
+from pyrogram.types import User
 
-from tg_secret import ChatRequestResult, SecretChat, SecretMessage
-from tg_secret.client import TelegramSecretClient
+from tg_secret import TelegramSecretClient, ChatRequestResult, SecretChat, SecretMessage
+from tg_secret.client_adapters.pyrogram_adapter import PyrogramClientAdapter
 
 client = Client(
     "secret_client",
     api_id=...,  # Your api id
     api_hash=...,  # Your api hash
 )
-secret = TelegramSecretClient(client)
+secret = TelegramSecretClient(PyrogramClientAdapter(client))
 
 
 @secret.on_request
-async def secret_chat_request(chat: EncryptedChatRequested, user: User) -> ChatRequestResult:
+async def secret_chat_request(chat: SecretChat) -> ChatRequestResult:
+    user: User = await client.get_users(chat.peer_id)
     print(f"Accepting new secret chat from {user.first_name} ({user.id})")
     return ChatRequestResult.ACCEPT
 
@@ -42,8 +44,8 @@ async def new_secret_message(message: SecretMessage) -> None:
     if message.text == "/delete_chat":
         await message.reply("Discarding chat...")
         await message.chat.delete(delete_history=False)
-        return 
-    
+        return
+
     await message.reply(f"**{message.text}**")
 
 
@@ -53,8 +55,8 @@ async def secret_messages_deleted(chat: SecretChat, random_ids: list[int]):
 
 
 @secret.on_chat_deleted
-async def secret_chat_deleted(chat: SecretChat):
-    print(f"Secret chat with {chat.peer_id} was deleted")
+async def secret_chat_deleted(chat: SecretChat, history_deleted: bool):
+    print(f"Secret chat with {chat.peer_id} was deleted, with history: {history_deleted}")
 
 
 if __name__ == "__main__":

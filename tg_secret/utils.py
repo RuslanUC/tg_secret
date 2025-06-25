@@ -31,3 +31,19 @@ def msg_key_v2(key: bytes, padded_plaintext: bytes, from_originator: bool) -> by
     msg_key = msg_key_large[8:8 + 16]
 
     return msg_key
+
+
+def write_int(value: int) -> bytes:
+    return value.to_bytes(4, "little", signed=True)
+
+
+def write_long(value: int) -> bytes:
+    return value.to_bytes(8, "little", signed=True)
+
+
+def read_int(value: bytes) -> int:
+    return int.from_bytes(value[:4], "little", signed=True)
+
+
+def read_long(value: bytes) -> int:
+    return int.from_bytes(value[:8], "little", signed=True)

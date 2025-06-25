@@ -1,0 +1,233 @@
+from typing import cast
+
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+from pyrogram.raw.functions.messages import GetDhConfig, AcceptEncryption, DiscardEncryption, SendEncryptedService, \
+    SendEncrypted
+from pyrogram.raw.types import InputEncryptedChat, EncryptedChat, MessageEntityBold, MessageEntityItalic, \
+    MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, \
+    MessageEntitySpoiler, MessageEntityTextUrl, MessageEntityCustomEmoji, UpdateNewEncryptedMessage, \
+    UpdateEncryption, EncryptedMessage, EncryptedMessageService, EncryptedFile, EncryptedFileEmpty, \
+    EncryptedChatRequested, EncryptedChatDiscarded
+from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
+
+from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
+    DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
+    EncryptedMessageServiceA, EncryptedFileA, NewChatUpdateFuncT, NewChatRequestedFuncT, NewChatDiscardedFuncT, \
+    EncryptedChatRequestedA
+from tg_secret.raw.base import MessageEntity
+from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEntityItalic as SecretEntityItalic, \
+    MessageEntityUnderline as SecretEntityUnderline, MessageEntityStrike as SecretEntityStrike, \
+    MessageEntityBlockquote as SecretEntityBlockquote, MessageEntityCode as SecretEntityCode, \
+    MessageEntityPre as SecretEntityPre, MessageEntitySpoiler as SecretEntitySpoiler, \
+    MessageEntityTextUrl as SecretEntityTextUrl, MessageEntityCustomEmoji as SecretEntityCustomEmoji
+
+_parse_mode_a_to_pyrogram = {
+    ParseModeA.DISABLED: ParseMode.DISABLED,
+    ParseModeA.DEFAULT: ParseMode.DEFAULT,
+    ParseModeA.MARKDOWN: ParseMode.MARKDOWN,
+    ParseModeA.HTML: ParseMode.HTML,
+}
+
+
+_pyrogram_entities_mapping = {
+    MessageEntityBold: SecretEntityBold,
+    MessageEntityItalic: SecretEntityItalic,
+    MessageEntityUnderline: SecretEntityUnderline,
+    MessageEntityStrike: SecretEntityStrike,
+    MessageEntityBlockquote: SecretEntityBlockquote,
+    MessageEntityCode: SecretEntityCode,
+    MessageEntityPre: SecretEntityPre,
+    MessageEntitySpoiler: SecretEntitySpoiler,
+    MessageEntityTextUrl: SecretEntityTextUrl,
+    MessageEntityCustomEmoji: SecretEntityCustomEmoji,
+}
+
+_entities_min_layers = {
+    SecretEntityUnderline: 144,
+    SecretEntityStrike: 144,
+    SecretEntityBlockquote: 144,
+    SecretEntitySpoiler: 144,
+    SecretEntityCustomEmoji: 144,
+}
+
+def _get_entities_with_layer(entities: list[...], peer_layer: int) -> list[MessageEntity]:
+    if peer_layer < 45 or not entities:
+        return []
+
+    result = []
+    for entity in entities:
+        secret_entity_cls = _pyrogram_entities_mapping.get(type(entity))
+        if secret_entity_cls is None:
+            continue
+        if _entities_min_layers.get(secret_entity_cls, 0) > peer_layer:
+            continue
+
+        kwargs = {}
+        for slot in entity.__slots__:
+            kwargs[slot] = getattr(entity, slot)
+
+        result.append(secret_entity_cls(**kwargs))
+
+    return result
+
+
+class PyrogramClientAdapter(SecretClientAdapter):
+    __slots__ = (
+        "client", "new_message_handler", "chat_update_handler", "chat_requested_handler", "chat_discarded_handler",
+        "raw_handler_set",
+    )
+
+    def __init__(self, client: Client):
+        self.client = client
+        self.new_message_handler: NewEncryptedMessageFuncT | None = None
+        self.chat_update_handler: NewChatUpdateFuncT | None = None
+        self.chat_requested_handler: NewChatRequestedFuncT | None = None
+        self.chat_discarded_handler: NewChatDiscardedFuncT | None = None
+        self.raw_handler_set = False
+
+    async def get_dh_config(self, version: int) -> DhConfigA | DhConfigNotModifiedA | None:
+        dh_config: DhConfig = await self.client.invoke(GetDhConfig(version=version, random_length=0))
+        if isinstance(dh_config, DhConfig):
+            return DhConfigA(version=dh_config.version, p=dh_config.p, g=dh_config.g)
+        if isinstance(dh_config, DhConfigNotModified):
+            return DhConfigNotModifiedA()
+
+    async def accept_encryption(
+            self, chat_id: int, access_hash: int, g_b: bytes, key_fingerprint: int,
+    ) -> EncryptedChatA | None:
+        accepted_chat: EncryptedChat = await self.client.invoke(AcceptEncryption(
+            peer=InputEncryptedChat(chat_id=chat_id, access_hash=access_hash),
+            g_b=g_b,
+            key_fingerprint=key_fingerprint,
+        ))
+
+        if not isinstance(accepted_chat, EncryptedChat):
+            raise ValueError(f"Expected server to return EncryptedChat, got {accepted_chat.__class__.__name__}")
+
+        return EncryptedChatA(
+            id=accepted_chat.id,
+            g_a_or_b=accepted_chat.g_a_or_b,
+            key_fingerprint=accepted_chat.key_fingerprint,
+        )
+
+    async def discard_encryption(self, chat_id: int, delete_history: bool) -> None:
+        await self.client.invoke(DiscardEncryption(chat_id=chat_id, delete_history=delete_history))
+
+    async def send_encrypted(self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool) -> None:
+        await self.client.invoke(SendEncrypted(
+            peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
+            random_id=random_id,
+            data=data,
+            silent=silent,
+        ))
+
+    async def send_encrypted_service(self, peer: InputEncryptedChatA, random_id: int, data: bytes) -> None:
+        await self.client.invoke(SendEncryptedService(
+            peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
+            random_id=random_id,
+            data=data,
+        ))
+
+    async def parse_entities_for_layer(
+            self, text: str, layer: int, mode: ParseModeA,
+    ) -> tuple[str, list[MessageEntity]]:
+        parse_mode = _parse_mode_a_to_pyrogram.get(mode, ParseMode.DEFAULT)
+
+        parse_result = await self.client.parser.parse(text, parse_mode)
+        message = parse_result["message"]
+        entities = _get_entities_with_layer(parse_result["entities"], layer)
+
+        return message, entities
+
+    async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
+        if isinstance(update, UpdateNewEncryptedMessage):
+            if self.new_message_handler is None:
+                return
+
+            enc_message: EncryptedMessage | EncryptedMessageService = update.message
+            if isinstance(enc_message, EncryptedMessage):
+                enc_file: EncryptedFile | EncryptedFileEmpty = enc_message.file
+                message = EncryptedMessageA(
+                    random_id=enc_message.random_id,
+                    chat_id=enc_message.chat_id,
+                    date=enc_message.date,
+                    bytes=enc_message.bytes,
+                    file=EncryptedFileA(
+                        id=enc_file.id,
+                        access_hash=enc_file.access_hash,
+                        size=enc_file.size,
+                        dc_id=enc_file.dc_id,
+                        key_fingerprint=enc_file.key_fingerprint,
+                    ) if isinstance(enc_file, EncryptedFile) else None,
+                )
+            elif isinstance(enc_message, EncryptedMessageService):
+                message = EncryptedMessageServiceA(
+                    random_id=enc_message.random_id,
+                    chat_id=enc_message.chat_id,
+                    date=enc_message.date,
+                    bytes=enc_message.bytes,
+                )
+            else:
+                return
+
+            return await self.new_message_handler(message, update.qts)
+
+        if not isinstance(update, UpdateEncryption):
+            return
+
+        chat = update.chat
+        if isinstance(chat, EncryptedChatRequested):
+            if self.chat_requested_handler is None:
+                return
+
+            return await self.chat_requested_handler(EncryptedChatRequestedA(
+                id=chat.id,
+                access_hash=chat.access_hash,
+                date=chat.date,
+                admin_id=chat.admin_id,
+                participant_id=chat.participant_id,
+                g_a=chat.g_a,
+            ))
+        elif isinstance(chat, EncryptedChatDiscarded):
+            if self.chat_discarded_handler is None:
+                return
+
+            return await self.chat_discarded_handler(chat.id, chat.history_deleted)
+        elif isinstance(chat, EncryptedChat):
+            if self.chat_discarded_handler is None:
+                return
+
+            chat = cast(EncryptedChat, chat)
+            return await self.chat_update_handler(EncryptedChatA(
+                id=chat.id,
+                g_a_or_b=chat.g_a_or_b,
+                key_fingerprint=chat.key_fingerprint,
+            ))
+
+    def _register_raw_handler_maybe(self) -> None:
+        if not self.raw_handler_set:
+            self.client.on_raw_update()(self._raw_updates_handler)
+            self.raw_handler_set = True
+
+    def set_encrypted_message_handler(self, func: NewEncryptedMessageFuncT) -> None:
+        self.new_message_handler = func
+        self._register_raw_handler_maybe()
+
+    def set_chat_update_handler(self, func: NewChatUpdateFuncT) -> None:
+        self.chat_update_handler = func
+        self._register_raw_handler_maybe()
+
+    def set_chat_requested_handler(self, func: NewChatRequestedFuncT) -> None:
+        self.chat_requested_handler = func
+        self._register_raw_handler_maybe()
+
+    def set_chat_discarded_handler(self, func: NewChatDiscardedFuncT) -> None:
+        self.chat_discarded_handler = func
+        self._register_raw_handler_maybe()
+
+    def get_event_loop(self) -> ...:
+        return self.client.loop
+
+    def get_session_name(self) -> str:
+        return self.client.name

@@ -14,3 +14,10 @@ class ChatState(IntEnum):
     WAITING = 2
     # Accepted chat
     READY = 3
+
+
+class ParseMode(Enum):
+    DISABLED = auto()
+    DEFAULT = auto()
+    MARKDOWN = auto()
+    HTML = auto()

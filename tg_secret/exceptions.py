@@ -19,3 +19,10 @@ class SecretLayerException(SecretException):
         self.feature = feature
         self.peer_layer = peer_layer
         self.need_layer = need_layer
+
+
+class SecretSecurityException(SecretException):
+    @classmethod
+    def check(cls, cond: bool, msg: str):
+        if not cond:
+            raise cls(f"Security check failed: {msg}")

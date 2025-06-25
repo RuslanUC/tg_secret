@@ -1,60 +1,46 @@
 from __future__ import annotations
 
+import sys
 from hashlib import sha1
 from io import BytesIO
 from os import urandom
 from pathlib import Path
 from random import randint
 from time import time
-from typing import TYPE_CHECKING, Awaitable, Any, Callable, cast
+from typing import Awaitable, Any, Callable, cast
 
-from pyrogram.enums import ParseMode
-from pyrogram.errors import SecurityCheckMismatch
-from pyrogram.methods.utilities.idle import idle
-from pyrogram.raw.core import Int, Long
-from pyrogram.raw.functions.messages import DiscardEncryption, GetDhConfig, AcceptEncryption, SendEncryptedService, \
-    SendEncrypted
-from pyrogram.raw.types import MessageEntityBold as PyroEntityBold, MessageEntityItalic as PyroEntityItalic, \
-    MessageEntityUnderline as PyroEntityUnderline, MessageEntityStrike as PyroEntityStrike, \
-    MessageEntityBlockquote as PyroEntityBlockquote, MessageEntityCode as PyroEntityCode, \
-    MessageEntityPre as PyroEntityPre, MessageEntitySpoiler as PyroEntitySpoiler, \
-    MessageEntityTextUrl as PyroEntityTextUrl, MessageEntityCustomEmoji as PyroEntityCustomEmoji
-from pyrogram.raw.types import User, UpdateEncryption, EncryptedChatRequested, InputEncryptedChat, EncryptedChat, \
-    EncryptedChatDiscarded, UpdateNewEncryptedMessage, EncryptedMessageService, EncryptedMessage
-from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
-from tgcrypto import ige256_encrypt, ige256_decrypt
-
-from .enums import ChatState, ChatRequestResult
-from .exceptions import SecretChatNotReadyException, SecretLayerException
+from .aes import ige256_encrypt, ige256_decrypt
+from .client_adapters.base_adapter import DhConfigA, DhConfigNotModifiedA, InputEncryptedChatA, EncryptedMessageA, \
+    EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter
+from .client_adapters.pyrogram_adapter import PyrogramClientAdapter
+from .enums import ChatState, ChatRequestResult, ParseMode
+from .exceptions import SecretChatNotReadyException, SecretLayerException, SecretSecurityException
 from .raw import SecretTLObject
 from .raw.all import layer
-from .raw.base import MessageEntity
 from .raw.types import DecryptedMessageService_17, DecryptedMessageActionNotifyLayer, DecryptedMessageLayer, \
     DecryptedMessageService_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73, DecryptedMessage_8, \
     DecryptedMessageActionAbortKey, DecryptedMessageActionAcceptKey, DecryptedMessageActionCommitKey, \
     DecryptedMessageActionDeleteMessages, DecryptedMessageActionFlushHistory, DecryptedMessageActionNoop, \
     DecryptedMessageActionReadMessages, DecryptedMessageActionRequestKey, DecryptedMessageActionResend, \
     DecryptedMessageActionScreenshotMessages, DecryptedMessageActionSetMessageTTL, DecryptedMessageActionTyping, \
-    DecryptedMessageMediaEmpty, MessageEntityBold, MessageEntityItalic, MessageEntityUnderline, MessageEntityStrike, \
-    MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, MessageEntitySpoiler, MessageEntityTextUrl, \
-    MessageEntityCustomEmoji
+    DecryptedMessageMediaEmpty
 from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, SecretChat
 from .types import SecretChat as TypesSecretChat, SecretMessage
-from .utils import msg_key_v2, kdf_v2
-
-if TYPE_CHECKING:
-    from pyrogram import Client
+from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_int
 
 # TODO: replace client.log_out to also remove secret database file
 # TODO: allow using same session file as pyrogram
 # TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
 # TODO: add method to list secret chats
+# TODO: add method to request secret chat
+# TODO: logging
+# TODO: make tl-compiled classes not depend on pyrogram
 
-ChatRequestFuncT = Callable[[EncryptedChatRequested, User], Awaitable[ChatRequestResult]]
+ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
 NewMessageFuncT = Callable[[SecretMessage], Awaitable[Any]]
 MessagesDeletedFuncT = Callable[[TypesSecretChat, list[int]], Awaitable[Any]]
-ChatDeletedFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
+ChatDeletedFuncT = Callable[[TypesSecretChat, bool], Awaitable[Any]]
 HistoryDeletedFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
 
 decrypted_message_clss = (DecryptedMessage_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73)
@@ -64,14 +50,16 @@ decrypted_message_service_clss = (DecryptedMessageService_8, DecryptedMessageSer
 class TelegramSecretClient:
     def __init__(
             self,
-            client: Client,
+            client_adapter: SecretClientAdapter,
             session_name: str | None = None,
-            workdir: Path | None = None,
+            workdir: Path = Path(sys.argv[0]).parent,
             in_memory: bool = False,
     ) -> None:
-        self._client = client
-        self._name = session_name or client.name
-        self._workdir = workdir or client.workdir
+        self._adapter = client_adapter
+
+        self._loop = client_adapter.get_event_loop()
+        self._name = session_name or client_adapter.get_session_name()
+        self._workdir = workdir
 
         if in_memory or self._name == ":memory:":
             self._storage = MemoryStorage(self._name)
@@ -80,7 +68,11 @@ class TelegramSecretClient:
 
         # TODO: pyrogram executes update handlers as separate tasks, find a way to ensure that updates
         #  are processed sequentially (maybe asyncio.Lock?)
-        self._client.on_raw_update()(self._raw_updates_handler)
+
+        self._adapter.set_encrypted_message_handler(self._on_new_encrypted_message_handler)
+        self._adapter.set_chat_update_handler(self._on_chat_updated_handler)
+        self._adapter.set_chat_requested_handler(self._on_chat_requested_handler)
+        self._adapter.set_chat_discarded_handler(self._on_chat_discarded_handler)
 
         self._on_requested_handlers: list[ChatRequestFuncT] = []
         self._on_ready_handlers: list[ChatReadyFuncT] = []
@@ -147,51 +139,61 @@ class TelegramSecretClient:
         await self.stop()
 
     async def pyrogram_start(self) -> None:
+        from pyrogram import Client, idle
+
+        if not isinstance(self._adapter, PyrogramClientAdapter) or not isinstance(self._adapter.client, Client):
+            raise RuntimeError("TelegramSecretClient.pyrogram_start() must be called only with pyrogram client!")
+
         async with self:
-            await self._client.start()
+            await self._adapter.client.start()
             await idle()
-            await self._client.stop()
+            await self._adapter.client.stop()
 
-    async def _raw_updates_handler(self, _client, update: UpdateEncryption, users: dict[int, User], _chats) -> None:
-        if isinstance(update, UpdateNewEncryptedMessage):
-            await self._handle_encrypted_update(update)
+    async def _on_new_encrypted_message_handler(
+            self, message: EncryptedMessageA | EncryptedMessageServiceA, qts: int,
+    ) -> None:
+        await self._handle_encrypted_update(message)
+        # TODO: ack qts with receivedQueue()
+
+    async def _on_chat_updated_handler(self, chat: EncryptedChatA) -> None:
+        ...  # TODO: mark chat as READY if local chat is WAITING
+
+    async def _on_chat_requested_handler(self, chat: EncryptedChatRequestedA) -> None:
+        await self._storage.add_chat(
+            chat.id,
+            access_hash=chat.access_hash,
+            created_at=chat.date,
+            admin_id=chat.admin_id,
+            participant_id=chat.participant_id,
+            state=ChatState.REQUESTED,
+            originator=False,
+            peer_layer=46,
+            this_layer=46,
+        )
+
+        secret_chat = await self.get_chat(chat.id)
+
+        for handler in self._on_requested_handlers:
+            result = await handler(secret_chat)
+            if result is ChatRequestResult.ACCEPT:
+                await self._accept_chat(chat)
+                return
+            elif result is ChatRequestResult.DISCARD:
+                await self.discard_chat(chat.id)
+
+    async def _on_chat_discarded_handler(self, chat_id: int, history_deleted: bool) -> None:
+        secret_chat = await self.get_chat(chat_id)
+        await self._storage.delete_chat(chat_id)
+        if secret_chat is None:
             return
 
-        if not isinstance(update, UpdateEncryption):
-            return
-
-        chat = update.chat
-        if isinstance(chat, EncryptedChatRequested):
-            await self._storage.add_chat(
-                chat.id,
-                access_hash=chat.access_hash,
-                created_at=chat.date,
-                admin_id=chat.admin_id,
-                participant_id=chat.participant_id,
-                state=ChatState.REQUESTED,
-                originator=False,
-                peer_layer=46,
-                this_layer=46,
-            )
-
-            for handler in self._on_requested_handlers:
-                result = await handler(chat, users[chat.admin_id])
-                if result is ChatRequestResult.ACCEPT:
-                    await self._accept_chat(chat)
-                    return
-                elif result is ChatRequestResult.DISCARD:
-                    await self.discard_chat(chat.id)
-        elif isinstance(chat, EncryptedChatDiscarded):
-            secret_chat = await self.get_chat(chat.id)
-            await self._storage.delete_chat(chat.id)
-
-            for handler in self._on_chat_deleted_handlers:
-                self._client.loop.create_task(handler(secret_chat))
+        for handler in self._on_chat_deleted_handlers:
+            self._loop.create_task(handler(secret_chat, history_deleted))
 
     async def _check_and_set_dh_values(self, version: int, p: bytes, g: int) -> None:
         dh_prime = int.from_bytes(p, "big")
-        SecurityCheckMismatch.check(2 <= g <= 7, "2 <= g <= 7")
-        SecurityCheckMismatch.check(2 ** 2047 < dh_prime < 2 ** 2048, "2 ** 2047 < dh_prime < 2 ** 2048")
+        SecretSecurityException.check(2 <= g <= 7, "2 <= g <= 7")
+        SecretSecurityException.check(2 ** 2047 < dh_prime < 2 ** 2048, "2 ** 2047 < dh_prime < 2 ** 2048")
 
         # TODO: check if both dh_prime and (dh_prime - 1) / 2 are prime numbers
         # TODO: check that g generates a cyclic subgroup of prime order (p-1)/2
@@ -202,25 +204,23 @@ class TelegramSecretClient:
         local_config = await self._storage.get_dh_config(None)
         dh_version = local_config.version if local_config is not None else 0
 
-        dh_config = await self._client.invoke(GetDhConfig(version=dh_version, random_length=0))
-        if isinstance(dh_config, DhConfig):
-            version, p, g = dh_config.version, dh_config.p, dh_config.g
-            await self._check_and_set_dh_values(version, p, g)
-            return await self._storage.get_dh_config(version)
+        dh_config = await self._adapter.get_dh_config(dh_version)
+        if isinstance(dh_config, DhConfigA):
+            await self._check_and_set_dh_values(dh_config.version, dh_config.p, dh_config.g)
+            return await self._storage.get_dh_config(dh_config.version)
 
-        if isinstance(dh_config, DhConfigNotModified):
+        if isinstance(dh_config, DhConfigNotModifiedA):
             if local_config is not None:
                 return local_config
 
-            dh_config = await self._client.invoke(GetDhConfig(version=dh_version - 1, random_length=0))
-            if not isinstance(dh_config, DhConfig):
+            dh_config = await self._adapter.get_dh_config(dh_version - 1)
+            if not isinstance(dh_config, DhConfigA):
                 raise ValueError("Client does not have dh values locally and server still returns NotModified")
 
-            version, p, g = dh_config.version, dh_config.p, dh_config.g
-            await self._check_and_set_dh_values(version, p, g)
-            return await self._storage.get_dh_config(version)
+            await self._check_and_set_dh_values(dh_config.version, dh_config.p, dh_config.g)
+            return await self._storage.get_dh_config(dh_config.version)
 
-        raise RuntimeError(f"Expected DhConfig or DhConfigNotModified, got {dh_config.__class__.__name__}")
+        raise RuntimeError(f"Expected DhConfig or DhConfigNotModified, got {dh_config}")
 
     async def _gen_key_from_g_a(self, dh_version: int | None, g_a_bytes: bytes) -> tuple[bytes, bytes, int, int]:
         if dh_version is None:
@@ -231,8 +231,8 @@ class TelegramSecretClient:
         dh_prime = int.from_bytes(dh.p, "big")
         g_a = int.from_bytes(g_a_bytes, "big")
 
-        SecurityCheckMismatch.check(1 < g_a < dh_prime - 1, "1 < g_a < dh_prime - 1")
-        SecurityCheckMismatch.check(
+        SecretSecurityException.check(1 < g_a < dh_prime - 1, "1 < g_a < dh_prime - 1")
+        SecretSecurityException.check(
             2 ** (2048 - 64) < g_a < dh_prime - 2 ** (2048 - 64),
             "2 ** (2048 - 64) < g_a < dh_prime - 2 ** (2048 - 64)"
         )
@@ -241,26 +241,19 @@ class TelegramSecretClient:
         g_b = pow(dh.g, b, dh_prime).to_bytes(256, "big")
         key = pow(g_a, b, dh_prime).to_bytes(256, "big")
         key_fingerprint = sha1(key).digest()[-8:]
-        key_fingerprint = int.from_bytes(key_fingerprint, "little", signed=True)
+        key_fingerprint = read_long(key_fingerprint)
 
         return g_b, key, key_fingerprint, dh.version
 
-    async def _accept_chat(self, chat: EncryptedChatRequested) -> None:
+    async def _accept_chat(self, chat: EncryptedChatRequestedA) -> None:
         g_b, key, key_fingerprint, dh_version = await self._gen_key_from_g_a(None, chat.g_a)
 
-        new_chat = await self._client.invoke(AcceptEncryption(
-            peer=InputEncryptedChat(chat_id=chat.id, access_hash=chat.access_hash),
-            g_b=g_b,
-            key_fingerprint=key_fingerprint,
-        ))
+        new_chat = await self._adapter.accept_encryption(chat.id, chat.access_hash, g_b, key_fingerprint)
 
-        if not isinstance(new_chat, EncryptedChat):
-            raise ValueError(f"Expected server to return EncryptedChat, got {new_chat.__class__.__name__}")
-
-        SecurityCheckMismatch.check(
+        SecretSecurityException.check(
             new_chat.g_a_or_b == chat.g_a, "new_chat.g_a_or_b == chat.g_a",
         )
-        SecurityCheckMismatch.check(
+        SecretSecurityException.check(
             new_chat.key_fingerprint == key_fingerprint, "new_chat.key_fingerprint == key_fingerprint",
         )
 
@@ -280,10 +273,10 @@ class TelegramSecretClient:
 
         secret_chat = await self.get_chat(new_chat.id)
         for handler in self._on_ready_handlers:
-            self._client.loop.create_task(handler(secret_chat))
+            self._loop.create_task(handler(secret_chat))
 
     async def discard_chat(self, chat_id: int, delete_history: bool = False) -> None:
-        await self._client.invoke(DiscardEncryption(chat_id=chat_id))
+        await self._adapter.discard_encryption(chat_id, delete_history)
         await self._storage.delete_chat(chat_id)
 
     async def _notify_about_layer(self, chat_id: int) -> None:
@@ -300,14 +293,14 @@ class TelegramSecretClient:
         a_bytes = urandom(2048 // 8)
         a = int.from_bytes(a_bytes, "big")
         g_a = pow(dh.g, a, dh_prime).to_bytes(2048 // 8, "big")
-        exchange_id = int.from_bytes(urandom(8), "little", signed=True)
+        exchange_id = read_long(urandom(8))
 
         await self._storage.update_chat(chat, a=a_bytes, exchange_id=exchange_id)
         await self._send_service_message(chat_id, DecryptedMessageActionRequestKey(exchange_id=exchange_id, g_a=g_a))
 
     # TODO: properly annotate action
     async def _send_service_message(self, chat_id: int, action: SecretTLObject) -> None:
-        random_id = int.from_bytes(urandom(8), "little", signed=True)
+        random_id = read_long(urandom(8))
         await self._send_message(
             chat_id,
             DecryptedMessageService_17(
@@ -367,7 +360,7 @@ class TelegramSecretClient:
             message=decrypted_message,
         ).write()
         to_encrypt = (
-            Int(len(message_to_encrypt))
+            write_int(len(message_to_encrypt))
             + message_to_encrypt
             + urandom(randint(12, 512) // 4 * 4)
         )
@@ -377,58 +370,47 @@ class TelegramSecretClient:
         aes_key, aes_iv = kdf_v2(key, msg_key, chat.originator)
         encrypted_payload = ige256_encrypt(to_encrypt, aes_key, aes_iv)
 
-        final_payload = Long(chat.key_fp) + msg_key + encrypted_payload
+        final_payload = write_long(chat.key_fp) + msg_key + encrypted_payload
 
-        peer = InputEncryptedChat(chat_id=chat_id, access_hash=chat.access_hash)
-
+        peer = InputEncryptedChatA(chat_id=chat_id, access_hash=chat.access_hash)
         if isinstance(decrypted_message, decrypted_message_service_clss):
-            request = SendEncryptedService(
-                peer=peer,
-                random_id=random_id,
-                data=final_payload,
-            )
+            await self._adapter.send_encrypted_service(peer, random_id, final_payload)
         elif isinstance(decrypted_message, decrypted_message_clss):
-            request = SendEncrypted(
-                peer=peer,
-                random_id=random_id,
-                data=final_payload,
-                silent=silent,
-            )
+            await self._adapter.send_encrypted(peer, random_id, final_payload, silent)
         else:
             raise ValueError(
                 f"Expected DecryptedMessage or DecryptedMessageService, got {decrypted_message.__class__.__name__}"
             )
 
-        await self._client.invoke(request)
         await self._maybe_start_rekeying(chat)
 
-    async def _handle_encrypted_update(self, update: UpdateNewEncryptedMessage) -> None:
+    async def _handle_encrypted_update(self, message: EncryptedMessageA | EncryptedMessageServiceA) -> None:
         # TODO: handle files
 
-        if isinstance(update.message, EncryptedMessageService):
-            message = cast(EncryptedMessageService, update.message)
+        if isinstance(message, EncryptedMessageServiceA):
+            message = cast(EncryptedMessageServiceA, message)
             is_service = True
             chat_id = message.chat_id
             data = message.bytes
             file = None
-        elif isinstance(update.message, EncryptedMessage):
+        elif isinstance(message, EncryptedMessageA):
             # For some reason pycharm cant understand that if isinstance check succeeded,
-            #  then `update.message` is EncryptedMessage and still thinks that `update.message` is "base" type,
+            #  then `message` is EncryptedMessage and still thinks that `message` is "base" type,
             #  so doing typing-cast here.
             # It can be removed after pycharm stops complaining about
             #  "Unresolved attribute reference '...' for class 'EncryptedMessage'"
-            message = cast(EncryptedMessage, update.message)
+            message = cast(EncryptedMessageA, message)
             is_service = False
             chat_id = message.chat_id
             data = message.bytes
             file = message.file
         else:
             raise ValueError(
-                f"Expected EncryptedMessage or EncryptedMessageService, got {update.message.__class__.__name__}"
+                f"Expected EncryptedMessage or EncryptedMessageService, got {message.__class__.__name__}"
             )
 
         chat = await self._storage.get_chat(chat_id)
-        key_fp = int.from_bytes(data[:8], "little", signed=True)
+        key_fp = read_long(data)
         key = await self._get_or_switch_chat_key(chat, key_fp)
 
         data = data[8:]
@@ -438,7 +420,7 @@ class TelegramSecretClient:
         aes_key, aes_iv = kdf_v2(key, msg_key, not chat.originator)
         decrypted_payload = ige256_decrypt(data, aes_key, aes_iv)
 
-        length = int.from_bytes(decrypted_payload[:4], "little", signed=True)
+        length = read_int(decrypted_payload)
         decrypted_payload = decrypted_payload[4:]
         # Payload type + random bytes (at least 128 bits) + layer + in_seq_no + out_seq_no + message type + padding (at least 12 bytes)
         if length <= (4 + 128 // 8 + 4 + 4 + 4 + 4 + 12) or len(decrypted_payload) < length:
@@ -515,7 +497,7 @@ class TelegramSecretClient:
 
             try:
                 g_b, key, key_fingerprint, dh_version = await self._gen_key_from_g_a(chat.dh_config_version, action.g_a)
-            except SecurityCheckMismatch:
+            except SecretSecurityException:
                 await self._send_abort_key(chat.id, action.exchange_id)
                 return
 
@@ -539,7 +521,7 @@ class TelegramSecretClient:
             a = int.from_bytes(chat.a, "big")
             key = pow(g_b, a, dh_prime).to_bytes(2048 // 8, "big")
             key_fingerprint = sha1(key).digest()[-8:]
-            key_fingerprint = int.from_bytes(key_fingerprint, "little", signed=True)
+            key_fingerprint = read_long(key_fingerprint)
 
             if key_fingerprint != action.key_fingerprint:
                 await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
@@ -572,11 +554,11 @@ class TelegramSecretClient:
         elif isinstance(action, DecryptedMessageActionDeleteMessages):
             secret_chat = await self.get_chat(chat.id)
             for handler in self._on_messages_deleted_handlers:
-                self._client.loop.create_task(handler(secret_chat, action.random_ids))
+                self._loop.create_task(handler(secret_chat, action.random_ids))
         elif isinstance(action, DecryptedMessageActionFlushHistory):
             secret_chat = await self.get_chat(chat.id)
             for handler in self._on_history_deleted_handlers:
-                self._client.loop.create_task(handler(secret_chat))
+                self._loop.create_task(handler(secret_chat))
         elif isinstance(action, DecryptedMessageActionNoop):
             ...
         elif isinstance(action, DecryptedMessageActionNotifyLayer):
@@ -619,7 +601,7 @@ class TelegramSecretClient:
         )
 
         for handler in self._on_new_message_handlers:
-            self._client.loop.create_task(handler(new_message))
+            self._loop.create_task(handler(new_message))
 
     async def get_chat(self, chat_id: int) -> TypesSecretChat | None:
         chat = await self._storage.get_chat(chat_id)
@@ -637,48 +619,6 @@ class TelegramSecretClient:
             _client=self,
         )
 
-    _pyrogram_entities_mapping = {
-        PyroEntityBold: MessageEntityBold,
-        PyroEntityItalic: MessageEntityItalic,
-        PyroEntityUnderline: MessageEntityUnderline,
-        PyroEntityStrike: MessageEntityStrike,
-        PyroEntityBlockquote: MessageEntityBlockquote,
-        PyroEntityCode: MessageEntityCode,
-        PyroEntityPre: MessageEntityPre,
-        PyroEntitySpoiler: MessageEntitySpoiler,
-        PyroEntityTextUrl: MessageEntityTextUrl,
-        PyroEntityCustomEmoji: MessageEntityCustomEmoji,
-    }
-
-    _entities_min_layers = {
-        MessageEntityUnderline: 144,
-        MessageEntityStrike: 144,
-        MessageEntityBlockquote: 144,
-        MessageEntitySpoiler: 144,
-        MessageEntityCustomEmoji: 144,
-    }
-
-    @classmethod
-    def _get_entities_with_layer(cls, entities: list[...], peer_layer: int) -> list[MessageEntity]:
-        if peer_layer < 45 or not entities:
-            return []
-
-        result = []
-        for entity in entities:
-            secret_entity_cls = cls._pyrogram_entities_mapping.get(type(entity))
-            if secret_entity_cls is None:
-                continue
-            if cls._entities_min_layers.get(secret_entity_cls, 0) > peer_layer:
-                continue
-
-            kwargs = {}
-            for slot in entity.__slots__:
-                kwargs[slot] = getattr(entity, slot)
-
-            result.append(secret_entity_cls(**kwargs))
-
-        return result
-
     # TODO: allow sending by user id instead of chat id
     async def send_text_message(
             self,
@@ -695,11 +635,9 @@ class TelegramSecretClient:
         if chat.state is not ChatState.READY:
             raise SecretChatNotReadyException
 
-        parse_result = await self._client.parser.parse(text, parse_mode)
-        message = parse_result["message"]
-        entities = self._get_entities_with_layer(parse_result["entities"], chat.peer_layer)
+        message, entities = await self._adapter.parse_entities_for_layer(text, chat.peer_layer, parse_mode)
 
-        random_id = int.from_bytes(urandom(8), "little", signed=True)
+        random_id = read_long(urandom(8))
         if chat.peer_layer >= 73:
             request = DecryptedMessage_73(
                 random_id=random_id,
