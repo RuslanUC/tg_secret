@@ -41,5 +41,5 @@ class SecretChat:
     async def rekey(self) -> None:
         await self._client.rekey(self.id)
 
-    async def delete(self) -> None:
-        await self._client.discard_chat(self.id)
+    async def delete(self, delete_history: bool = False) -> None:
+        await self._client.discard_chat(self.id, delete_history)

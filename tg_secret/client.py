@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 # TODO: replace client.log_out to also remove secret database file
 # TODO: allow using same session file as pyrogram
 # TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
+# TODO: add method to list secret chats
 
 ChatRequestFuncT = Callable[[EncryptedChatRequested, User], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
@@ -281,7 +282,7 @@ class TelegramSecretClient:
         for handler in self._on_ready_handlers:
             self._client.loop.create_task(handler(secret_chat))
 
-    async def discard_chat(self, chat_id: int) -> None:
+    async def discard_chat(self, chat_id: int, delete_history: bool = False) -> None:
         await self._client.invoke(DiscardEncryption(chat_id=chat_id))
         await self._storage.delete_chat(chat_id)
 
@@ -678,7 +679,7 @@ class TelegramSecretClient:
 
         return result
 
-    # TODO: allow sending by user id
+    # TODO: allow sending by user id instead of chat id
     async def send_text_message(
             self,
             chat_id: int,
