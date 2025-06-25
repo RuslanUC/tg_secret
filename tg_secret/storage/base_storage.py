@@ -1,6 +1,13 @@
 from abc import ABC, abstractmethod
+from enum import Enum, auto
 
 from tg_secret.enums import ChatState
+
+class MissingType(Enum):
+    MISSING = auto()
+
+
+MISSING = MissingType.MISSING
 
 
 class DhConfig:
@@ -21,15 +28,16 @@ class DhConfig:
 
 class SecretChat:
     __slots__ = (
-        "id", "hash", "date", "admin_id", "participant_id", "state", "originator", "peer_layer", "this_layer",
-        "in_seq_no", "out_seq_no", "dh_config_id",
+        "id", "access_hash", "created_at", "admin_id", "participant_id", "state", "originator", "peer_layer", "this_layer",
+        "in_seq_no", "out_seq_no", "dh_config_version", "a", "exchange_id", "key", "key_fp", "fut_key", "fut_key_fp",
+        "key_used", "key_created_at",
     )
 
     def __init__(
             self,
             id: int,
-            hash: int,
-            date: int,
+            access_hash: int,
+            created_at: int,
             admin_id: int,
             participant_id: int,
             state: int,
@@ -38,11 +46,19 @@ class SecretChat:
             this_layer: int,
             in_seq_no: int,
             out_seq_no: int,
-            dh_config_id: int,
+            dh_config_version: int,
+            a: bytes | None,
+            exchange_id: int | None,
+            key: bytes | None,
+            key_fp: int,
+            fut_key: bytes | None,
+            fut_key_fp: int | None,
+            key_used: int,
+            key_created_at: int,
     ) -> None:
         self.id = id
-        self.hash = hash
-        self.date = date
+        self.access_hash = access_hash
+        self.created_at = created_at
         self.admin_id = admin_id
         self.participant_id = participant_id
         self.state = ChatState(state)
@@ -51,7 +67,15 @@ class SecretChat:
         self.this_layer = this_layer
         self.in_seq_no = in_seq_no
         self.out_seq_no = out_seq_no
-        self.dh_config_id = dh_config_id
+        self.dh_config_version = dh_config_version
+        self.a = a
+        self.exchange_id = exchange_id
+        self.key = key
+        self.key_fp = key_fp
+        self.fut_key = fut_key
+        self.fut_key_fp = fut_key_fp
+        self.key_used = key_used
+        self.key_created_at = key_created_at
 
 
 class EncryptionKey:
@@ -104,18 +128,40 @@ class BaseStorage(ABC):
         ...
 
     @abstractmethod
-    async def set_chat(
+    async def add_chat(
             self, chat_id: int, *,
-            access_hash: int | None = None,
-            created_at: int | None = None,
-            admin_id: int | None = None,
-            participant_id: int | None = None,
-            state: ChatState | None = None,
-            originator: bool | None = None,
-            peer_layer: int | None = None,
-            this_layer: int | None = None,
-            in_seq_no: int | None = None,
-            out_seq_no: int | None = None,
+            access_hash: int,
+            created_at: int,
+            admin_id: int,
+            participant_id: int,
+            state: ChatState,
+            originator: bool,
+            peer_layer: int,
+            this_layer: int,
+    ) -> None:
+        ...
+
+    @abstractmethod
+    async def update_chat(
+            self, chat: int | SecretChat, *,
+            access_hash: int | MissingType = MISSING,
+            created_at: int | MissingType = MISSING,
+            admin_id: int | MissingType = MISSING,
+            participant_id: int | MissingType = MISSING,
+            state: ChatState | MissingType = MISSING,
+            originator: bool | MissingType = MISSING,
+            peer_layer: int | MissingType = MISSING,
+            this_layer: int | MissingType = MISSING,
+            in_seq_no: int | MissingType = MISSING,
+            out_seq_no: int | MissingType = MISSING,
+            a: bytes | None | MissingType = MISSING,
+            exchange_id: int | None | MissingType = MISSING,
+            key: bytes | None | MissingType = MISSING,
+            key_fp: int | None | MissingType = MISSING,
+            fut_key: bytes | None | MissingType = MISSING,
+            fut_key_fp: int | None | MissingType = MISSING,
+            key_used: int | MissingType = MISSING,
+            key_created_at: int | MissingType = MISSING,
     ) -> None:
         ...
 
@@ -125,37 +171,4 @@ class BaseStorage(ABC):
 
     @abstractmethod
     async def delete_chat(self, chat_id: int) -> None:
-        ...
-
-    @abstractmethod
-    async def get_key(
-            self, chat_id: int, fingerprint: bytes | None = None, key_id: int | None = None,
-            exchange_id: int | None = None,
-    ) -> EncryptionKey | None:
-        ...
-
-    @abstractmethod
-    async def add_key(
-            self, chat_id: int, key: bytes | None = None, a: bytes | None = None, exchange_id: int | None = None,
-    ) -> None:
-        ...
-
-    @abstractmethod
-    async def update_key(
-            self, chat_id: int, *,
-            fingerprint_hex: str | None = None,
-            key: bytes | None = None,
-            created_at: int | None = None,
-            used: int | None = None,
-            a: bytes | None = None,
-            exchange_id: int | None = None,
-    ) -> None:
-        ...
-
-    @abstractmethod
-    async def inc_key(self, key_id: int) -> None:
-        ...
-
-    @abstractmethod
-    async def delete_key(self, key_id: int) -> None:
         ...

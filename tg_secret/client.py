@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Awaitable, Any, Callable, cast
 
 from pyrogram.errors import SecurityCheckMismatch
 from pyrogram.methods.utilities.idle import idle
-from pyrogram.raw.core import Int
+from pyrogram.raw.core import Int, Long
 from pyrogram.raw.functions.messages import DiscardEncryption, GetDhConfig, AcceptEncryption, SendEncryptedService, \
     SendEncrypted
 from pyrogram.raw.types import User, UpdateEncryption, EncryptedChatRequested, InputEncryptedChat, EncryptedChat, \
@@ -27,7 +27,7 @@ from .raw.types import DecryptedMessageService_17, DecryptedMessageActionNotifyL
     DecryptedMessageActionDeleteMessages, DecryptedMessageActionFlushHistory, DecryptedMessageActionNoop, \
     DecryptedMessageActionReadMessages, DecryptedMessageActionRequestKey, DecryptedMessageActionResend, \
     DecryptedMessageActionScreenshotMessages, DecryptedMessageActionSetMessageTTL, DecryptedMessageActionTyping
-from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig
+from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, SecretChat
 from .utils import msg_key_v2, kdf_v2
 
 if TYPE_CHECKING:
@@ -61,6 +61,8 @@ class TelegramSecretClient:
         else:
             self._storage = FileStorage(self._name, self._workdir)
 
+        # TODO: pyrogram executes update handlers as separate tasks, find a way to ensure that updates
+        #  are processed sequentially (maybe asyncio.Lock?)
         self._client.on_raw_update()(self._raw_updates_handler)
 
         self._on_requested_handlers: list[ChatRequestFuncT] = []
@@ -111,7 +113,7 @@ class TelegramSecretClient:
 
         chat = update.chat
         if isinstance(chat, EncryptedChatRequested):
-            await self._storage.set_chat(
+            await self._storage.add_chat(
                 chat.id,
                 access_hash=chat.access_hash,
                 created_at=chat.date,
@@ -119,10 +121,8 @@ class TelegramSecretClient:
                 participant_id=chat.participant_id,
                 state=ChatState.REQUESTED,
                 originator=False,
-                peer_layer=0,
-                this_layer=0,
-                in_seq_no=0,
-                out_seq_no=0,
+                peer_layer=46,
+                this_layer=46,
             )
 
             for handler in self._on_requested_handlers:
@@ -211,22 +211,17 @@ class TelegramSecretClient:
             new_chat.key_fingerprint == key_fingerprint, "new_chat.key_fingerprint == key_fingerprint",
         )
 
-        await self._storage.set_chat(
+        await self._storage.update_chat(
             new_chat.id,
-            access_hash=new_chat.access_hash,
-            created_at=new_chat.date,
-            admin_id=new_chat.admin_id,
-            participant_id=new_chat.participant_id,
             state=ChatState.READY,
             originator=False,
-            peer_layer=0,
             this_layer=layer,
-            in_seq_no=0,
-            out_seq_no=0,
             dh_config_version=dh_version,
+            key=key,
+            key_fp=key_fingerprint,
+            key_used=0,
+            key_created_at=int(time()),
         )
-
-        await self._storage.add_key(new_chat.id, key)
 
         await self._notify_about_layer(new_chat.id)
 
@@ -242,15 +237,18 @@ class TelegramSecretClient:
 
     async def _init_rekeying(self, chat_id: int) -> None:
         chat = await self._storage.get_chat(chat_id)
-        p, g = await self._storage.get_dh_config(version=chat.dh_config_id)
-        dh_prime = int.from_bytes(p, "big")
+        if chat.exchange_id is not None:
+            return
+
+        dh = await self._storage.get_dh_config(version=chat.dh_config_version)
+        dh_prime = int.from_bytes(dh.p, "big")
 
         a_bytes = urandom(2048 // 8)
         a = int.from_bytes(a_bytes, "big")
-        g_a = pow(g, a, dh_prime).to_bytes(2048 // 8, "big")
+        g_a = pow(dh.g, a, dh_prime).to_bytes(2048 // 8, "big")
         exchange_id = int.from_bytes(urandom(8), "little", signed=True)
 
-        await self._storage.add_key(chat_id, a=a_bytes, exchange_id=exchange_id)
+        await self._storage.update_chat(chat, a=a_bytes, exchange_id=exchange_id)
         await self._send_service_message(chat_id, DecryptedMessageActionRequestKey(exchange_id=exchange_id, g_a=g_a))
 
     # TODO: properly annotate action
@@ -267,13 +265,37 @@ class TelegramSecretClient:
     def _gen_in_out_seq_no(seq_no: int, out: bool, originator: bool):
         return seq_no * 2 + (1 if out == originator else 0)
 
+    async def _get_or_switch_chat_key(self, chat: SecretChat, fingerprint: int | None = None) -> bytes:
+        if fingerprint is None or fingerprint == chat.key_fp:
+            return chat.key
+        if fingerprint == chat.fut_key_fp:
+            await self._storage.update_chat(
+                chat,
+                key=chat.fut_key,
+                key_fp=chat.fut_key_fp,
+                key_used=0,
+                key_created_at=int(time()),
+                fut_key=None,
+                fut_key_fp=None,
+                exchange_id=None,
+                a=None,
+            )
+
+            return chat.key
+
+        raise RuntimeError("Unreachable")
+
+    async def _maybe_start_rekeying(self, chat: SecretChat) -> None:
+        if (chat.key_used > 100 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
+            await self._init_rekeying(chat.id)
+
     # TODO: SendEncryptedFile
     async def _send_message(self, chat_id: int, decrypted_message: SecretTLObject) -> None:
         # TODO: check if state is READY
         chat = await self._storage.get_chat(chat_id)
-        key = await self._storage.get_key(chat.id)
+        key = await self._get_or_switch_chat_key(chat)
 
-        await self._storage.inc_key(key.id)
+        await self._storage.update_chat(chat, key_used=chat.key_used + 1)
         old_out_seq = await self._storage.inc_chat_out_seq_no(chat_id)
 
         message_to_encrypt = DecryptedMessageLayer(
@@ -290,24 +312,25 @@ class TelegramSecretClient:
         )
         to_encrypt += b"\x00" * (-len(to_encrypt) % 16)
 
-        msg_key = msg_key_v2(key.key, to_encrypt, chat.originator)
-        aes_key, aes_iv = kdf_v2(key.key, msg_key, chat.originator)
+        msg_key = msg_key_v2(key, to_encrypt, chat.originator)
+        aes_key, aes_iv = kdf_v2(key, msg_key, chat.originator)
         encrypted_payload = ige256_encrypt(to_encrypt, aes_key, aes_iv)
 
-        key_fingerprint = bytes.fromhex(key.fingerprint_hex)
-        final_payload = key_fingerprint + msg_key + encrypted_payload
+        final_payload = Long(chat.key_fp) + msg_key + encrypted_payload
 
-        peer = InputEncryptedChat(chat_id=chat_id, access_hash=chat.hash)
+        peer = InputEncryptedChat(chat_id=chat_id, access_hash=chat.access_hash)
 
         if isinstance(decrypted_message, decrypted_message_service_clss):
             request = SendEncryptedService(
                 peer=peer,
+                # TODO: use same random_id as in decrypted_message
                 random_id=int.from_bytes(urandom(8), "little", signed=True),
                 data=final_payload,
             )
         elif isinstance(decrypted_message, decrypted_message_clss):
             request = SendEncrypted(
                 peer=peer,
+                # TODO: use same random_id as in decrypted_message
                 random_id=int.from_bytes(urandom(8), "little", signed=True),
                 data=final_payload,
                 # TODO: silent
@@ -318,6 +341,7 @@ class TelegramSecretClient:
             )
 
         await self._client.invoke(request)
+        await self._maybe_start_rekeying(chat)
 
     async def _handle_encrypted_update(self, update: UpdateNewEncryptedMessage) -> None:
         # TODO: handle files
@@ -346,17 +370,14 @@ class TelegramSecretClient:
 
         # TODO: check if state is READY
         chat = await self._storage.get_chat(chat_id)
-        key = await self._storage.get_key(chat.id, data[:8])
-
-        key_fingerprint = bytes.fromhex(key.fingerprint_hex)
-        if data[:8] != key_fingerprint:
-            return
+        key_fp = int.from_bytes(data[:8], "little", signed=True)
+        key = await self._get_or_switch_chat_key(chat, key_fp)
 
         data = data[8:]
         msg_key = data[:128 // 8]
         data = data[128 // 8:]
 
-        aes_key, aes_iv = kdf_v2(key.key, msg_key, not chat.originator)
+        aes_key, aes_iv = kdf_v2(key, msg_key, not chat.originator)
         decrypted_payload = ige256_decrypt(data, aes_key, aes_iv)
 
         length = int.from_bytes(decrypted_payload[:4], "little", signed=True)
@@ -385,7 +406,7 @@ class TelegramSecretClient:
                 f"we have {chat.in_seq_no=}"
             )
 
-        await self._storage.inc_key(key.id)
+        await self._storage.update_chat(chat, key_used=chat.key_used + 1)
         await self._storage.inc_chat_in_seq_no(chat_id)
 
         if is_service:
@@ -401,9 +422,25 @@ class TelegramSecretClient:
                 )
             await self._handle_encrypted_message(chat.id, obj.message)
 
-        key = await self._storage.get_key(chat.id, key_id=key.id)
-        if key.used > 100 or (time() - key.created_at) > 86400 * 7:
-            ... # TODO: re-key
+        await self._maybe_start_rekeying(chat)
+
+    async def _send_abort_key(self, chat_id: int, exchange_id: int) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionAbortKey(
+            exchange_id=exchange_id,
+        ))
+
+    async def _send_accept_key(self, chat_id: int, exchange_id: int, g_b: bytes, fp: int) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionAcceptKey(
+            exchange_id=exchange_id,
+            g_b=g_b,
+            key_fingerprint=fp,
+        ))
+
+    async def _send_commit_key(self, chat_id: int, exchange_id: int, fp: int) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionCommitKey(
+            exchange_id=exchange_id,
+            key_fingerprint=fp,
+        ))
 
     async def _handle_encrypted_service_message(
             self, chat_id: int, message: DecryptedMessageService_8 | DecryptedMessageService_17
@@ -412,45 +449,68 @@ class TelegramSecretClient:
         chat = await self._storage.get_chat(chat_id)
 
         if isinstance(action, DecryptedMessageActionRequestKey):
+            if chat.exchange_id is not None:
+                if chat.exchange_id > action.exchange_id:
+                    return
+                else:
+                    await self._send_abort_key(chat.id, chat.exchange_id)
+
             try:
-                g_b, key, key_fingerprint, dh_version = await self._gen_key_from_g_a(chat.dh_config_id, action.g_a)
+                g_b, key, key_fingerprint, dh_version = await self._gen_key_from_g_a(chat.dh_config_version, action.g_a)
             except SecurityCheckMismatch:
-                await self._send_service_message(chat.id, DecryptedMessageActionAbortKey(
-                    exchange_id=action.exchange_id,
-                ))
+                await self._send_abort_key(chat.id, action.exchange_id)
                 return
 
-            await self._storage.add_key(chat.id, key)
-            await self._send_service_message(chat.id, DecryptedMessageActionAcceptKey(
+            await self._storage.update_chat(
+                chat,
                 exchange_id=action.exchange_id,
-                g_b=g_b,
-                key_fingerprint=key_fingerprint,
-            ))
+                a=None,
+                fut_key=key,
+                fut_key_fp=key_fingerprint,
+            )
+            await self._send_accept_key(chat.id, action.exchange_id, g_b, key_fingerprint)
         elif isinstance(action, DecryptedMessageActionAcceptKey):
-            dh_config = await self._storage.get_dh_config(chat.dh_config_id)
-            key_ = await self._storage.get_key(chat_id, exchange_id=action.exchange_id)
+            if chat.exchange_id is None or chat.a is None or chat.exchange_id != action.exchange_id:
+                await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
+                return await self._send_abort_key(chat.id, action.exchange_id)
+
+            dh_config = await self._storage.get_dh_config(chat.dh_config_version)
 
             dh_prime = int.from_bytes(dh_config.p, "big")
             g_b = int.from_bytes(action.g_b, "big")
-            a = int.from_bytes(key_.a, "big")
+            a = int.from_bytes(chat.a, "big")
             key = pow(g_b, a, dh_prime).to_bytes(2048 // 8, "big")
             key_fingerprint = sha1(key).digest()[-8:]
-            fingerprint_hex = key_fingerprint.hex()
             key_fingerprint = int.from_bytes(key_fingerprint, "little", signed=True)
 
             if key_fingerprint != action.key_fingerprint:
-                ...  # TODO: abort key or whole chat
+                await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
+                return await self._send_abort_key(chat.id, action.exchange_id)
 
-            await self._storage.update_key(key_.id, key=key, fingerprint_hex=fingerprint_hex, a=b"", exchange_id=0)
-
-            await self._send_service_message(chat.id, DecryptedMessageActionCommitKey(
-                exchange_id=action.exchange_id,
-                key_fingerprint=key_fingerprint,
-            ))
+            await self._storage.update_chat(
+                chat,
+                fut_key=key,
+                fut_key_fp=key_fingerprint,
+            )
+            await self._send_commit_key(chat.id, action.exchange_id, key_fingerprint)
         elif isinstance(action, DecryptedMessageActionCommitKey):
-            ...  # TODO: re-keying: delete old keys
+            if chat.exchange_id == action.exchange_id and chat.fut_key_fp == action.key_fingerprint:
+                await self._storage.update_chat(
+                    chat,
+                    a=None,
+                    exchange_id=None,
+                    key=chat.fut_key,
+                    key_fp=chat.fut_key_fp,
+                    key_used=0,
+                    key_created_at=int(time()),
+                    fut_key=None,  # TODO: set to old key?
+                    fut_key_fp=None,  # TODO: set to old key fp?
+                )
+            else:
+                await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
+                return await self._send_abort_key(chat.id, action.exchange_id)
         elif isinstance(action, DecryptedMessageActionAbortKey):
-            ...  # TODO: re-keying: delete exchange
+            await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
         elif isinstance(action, DecryptedMessageActionDeleteMessages):
             ...
         elif isinstance(action, DecryptedMessageActionFlushHistory):
@@ -460,7 +520,7 @@ class TelegramSecretClient:
         elif isinstance(action, DecryptedMessageActionNotifyLayer):
             if chat.peer_layer >= action.layer:
                 return
-            await self._storage.set_chat(chat_id, peer_layer=action.layer)
+            await self._storage.update_chat(chat, peer_layer=action.layer)
         elif isinstance(action, DecryptedMessageActionReadMessages):
             ...
         elif isinstance(action, DecryptedMessageActionResend):
@@ -478,7 +538,8 @@ class TelegramSecretClient:
             self, chat_id: int,
             message: DecryptedMessage_8 | DecryptedMessage_17 | DecryptedMessage_45 | DecryptedMessage_73,
     ) -> None:
-        print(f"{chat_id}: {message.message}")
+        chat = await self._storage.get_chat(chat_id)
+        print(f"{chat_id} ({chat.key_fp}): {message.message}")
         await self.send_text_message(chat_id, message.message)
 
     # TODO: return message object
