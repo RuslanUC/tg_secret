@@ -35,6 +35,7 @@ from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_in
 # TODO: add method to request secret chat
 # TODO: logging
 # TODO: make tl-compiled classes not depend on pyrogram
+# TODO: after a rekey, there is gap in in_seq_no
 
 ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
@@ -194,9 +195,20 @@ class TelegramSecretClient:
         dh_prime = int.from_bytes(p, "big")
         SecretSecurityException.check(2 <= g <= 7, "2 <= g <= 7")
         SecretSecurityException.check(2 ** 2047 < dh_prime < 2 ** 2048, "2 ** 2047 < dh_prime < 2 ** 2048")
+        x = dh_prime % (4 * g)
+        SecretSecurityException.check(x < (4 * g), "x < (4 * g)")
+        if g == 2:
+            SecretSecurityException.check(x == 7, "x == 7")
+        elif g == 3:
+            SecretSecurityException.check((x % 3) == 2, "(x % 3) == 2")
+        elif g == 5:
+            SecretSecurityException.check((x % 5) in (1, 4), "(x % 5) in (1, 4)")
+        elif g == 6:
+            SecretSecurityException.check(x in (19, 23), "x in (19, 23)")
+        elif g == 7:
+            SecretSecurityException.check((x % 7) in (3, 5, 6), "(x % 7) in (3, 5, 6)")
 
         # TODO: check if both dh_prime and (dh_prime - 1) / 2 are prime numbers
-        # TODO: check that g generates a cyclic subgroup of prime order (p-1)/2
 
         await self._storage.set_dh_config(version, p, g)
 
