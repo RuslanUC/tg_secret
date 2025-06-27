@@ -38,9 +38,7 @@ from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_in
 # TODO: replace client.log_out to also remove secret database file
 # TODO: allow using same session file as pyrogram/telethon
 # TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
-# TODO: add method to list secret chats
 # TODO: add method to request secret chat
-# TODO: add method to get secret chat by user id
 # TODO: logging
 # TODO: after a rekey, there is gap in in_seq_no
 
@@ -574,8 +572,8 @@ class TelegramSecretClient:
                     key_fp=chat.fut_key_fp,
                     key_used=0,
                     key_created_at=int(time()),
-                    fut_key=None,  # TODO: set to old key?
-                    fut_key_fp=None,  # TODO: set to old key fp?
+                    fut_key=None,
+                    fut_key_fp=None,
                 )
             else:
                 await self._storage.update_chat(chat, exchange_id=None, a=None, fut_key=None, fut_key_fp=None)
