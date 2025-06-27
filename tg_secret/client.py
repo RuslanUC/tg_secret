@@ -35,9 +35,6 @@ from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, Sec
 from .types import SecretChat as TypesSecretChat, SecretMessage
 from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_int
 
-# TODO: replace client.log_out to also remove secret database file
-# TODO: allow using same session file as pyrogram/telethon
-# TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
 # TODO: add method to request secret chat
 # TODO: logging
 # TODO: after a rekey, there is gap in in_seq_no

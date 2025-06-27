@@ -1,16 +1,15 @@
 from typing import cast, BinaryIO
 
-from pyrogram import Client
-from pyrogram.enums import ParseMode
-from pyrogram.raw.functions.messages import GetDhConfig, AcceptEncryption, DiscardEncryption, SendEncryptedService, \
-    SendEncrypted, SendEncryptedFile, ReceivedQueue
-from pyrogram.raw.types import InputEncryptedChat, EncryptedChat, MessageEntityBold, MessageEntityItalic, \
-    MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, \
-    MessageEntitySpoiler, MessageEntityTextUrl, MessageEntityCustomEmoji, UpdateNewEncryptedMessage, \
-    UpdateEncryption, EncryptedMessage, EncryptedMessageService, EncryptedFile, EncryptedFileEmpty, \
-    EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig, InputEncryptedFile, \
-    InputEncryptedFileUploaded, InputEncryptedFileBigUploaded
-from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
+from telethon import TelegramClient, events
+from telethon.tl.functions.messages import GetDhConfigRequest, AcceptEncryptionRequest, DiscardEncryptionRequest, \
+    SendEncryptedRequest, SendEncryptedServiceRequest, SendEncryptedFileRequest, ReceivedQueueRequest
+from telethon.tl.types import EncryptedChat, InputEncryptedChat, InputEncryptedFileUploaded, \
+    InputEncryptedFileBigUploaded, MessageEntityBold, MessageEntityItalic, MessageEntityUnderline, MessageEntityStrike, \
+    MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, MessageEntitySpoiler, MessageEntityTextUrl, \
+    MessageEntityCustomEmoji, UpdateEncryption, UpdateNewEncryptedMessage, EncryptedMessage, EncryptedMessageService, \
+    EncryptedFileEmpty, EncryptedFile, EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig
+from telethon.tl.types.messages import DhConfig, DhConfigNotModified
+from telethon.utils import get_attributes
 
 from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
     DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
@@ -24,11 +23,11 @@ from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEn
     MessageEntityPre as SecretEntityPre, MessageEntitySpoiler as SecretEntitySpoiler, \
     MessageEntityTextUrl as SecretEntityTextUrl, MessageEntityCustomEmoji as SecretEntityCustomEmoji
 
-_parse_mode_a_to_pyrogram = {
-    ParseModeA.DISABLED: ParseMode.DISABLED,
-    ParseModeA.DEFAULT: ParseMode.DEFAULT,
-    ParseModeA.MARKDOWN: ParseMode.MARKDOWN,
-    ParseModeA.HTML: ParseMode.HTML,
+_parse_mode_a_to_telethon = {
+    ParseModeA.DISABLED: None,
+    ParseModeA.DEFAULT: (),
+    ParseModeA.MARKDOWN: "markdown",
+    ParseModeA.HTML: "html",
 }
 
 
@@ -66,7 +65,7 @@ def _get_entities_with_layer(entities: list[...], peer_layer: int) -> list[Messa
             continue
 
         kwargs = {}
-        for slot in entity.__slots__:
+        for slot in secret_entity_cls.__slots__:
             kwargs[slot] = getattr(entity, slot)
 
         result.append(secret_entity_cls(**kwargs))
@@ -80,7 +79,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
         "raw_handler_set",
     )
 
-    def __init__(self, client: Client):
+    def __init__(self, client: TelegramClient):
         self.client = client
         self.new_message_handler: NewEncryptedMessageFuncT | None = None
         self.chat_update_handler: NewChatUpdateFuncT | None = None
@@ -89,7 +88,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
         self.raw_handler_set = False
 
     async def get_dh_config(self, version: int) -> DhConfigA | DhConfigNotModifiedA | None:
-        dh_config: DhConfig = await self.client.invoke(GetDhConfig(version=version, random_length=0))
+        dh_config: DhConfig = await self.client(GetDhConfigRequest(version=version, random_length=0))
         if isinstance(dh_config, DhConfig):
             return DhConfigA(version=dh_config.version, p=dh_config.p, g=dh_config.g)
         if isinstance(dh_config, DhConfigNotModified):
@@ -98,7 +97,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
     async def accept_encryption(
             self, chat_id: int, access_hash: int, g_b: bytes, key_fingerprint: int,
     ) -> EncryptedChatA | None:
-        accepted_chat: EncryptedChat = await self.client.invoke(AcceptEncryption(
+        accepted_chat: EncryptedChat = await self.client(AcceptEncryptionRequest(
             peer=InputEncryptedChat(chat_id=chat_id, access_hash=access_hash),
             g_b=g_b,
             key_fingerprint=key_fingerprint,
@@ -114,10 +113,10 @@ class PyrogramClientAdapter(SecretClientAdapter):
         )
 
     async def discard_encryption(self, chat_id: int, delete_history: bool) -> None:
-        await self.client.invoke(DiscardEncryption(chat_id=chat_id, delete_history=delete_history))
+        await self.client(DiscardEncryptionRequest(chat_id=chat_id, delete_history=delete_history))
 
     async def send_encrypted(self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool) -> None:
-        await self.client.invoke(SendEncrypted(
+        await self.client(SendEncryptedRequest(
             peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
             random_id=random_id,
             data=data,
@@ -125,7 +124,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
         ))
 
     async def send_encrypted_service(self, peer: InputEncryptedChatA, random_id: int, data: bytes) -> None:
-        await self.client.invoke(SendEncryptedService(
+        await self.client(SendEncryptedServiceRequest(
             peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
             random_id=random_id,
             data=data,
@@ -151,27 +150,28 @@ class PyrogramClientAdapter(SecretClientAdapter):
         else:
             raise ValueError(f"Expected InputFileUploadedA or InputFileBigUploadedA, got {file.__class__.__name__}")
 
-        await self.client.invoke(SendEncryptedFile(
+        await self.client(SendEncryptedFileRequest(
             peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
             random_id=random_id,
             data=data,
-            file=cast(InputEncryptedFile, input_file),
+            file=input_file,
             silent=silent,
         ))
 
     async def parse_entities_for_layer(
             self, text: str, layer: int, mode: ParseModeA,
     ) -> tuple[str, list[MessageEntity]]:
-        parse_mode = _parse_mode_a_to_pyrogram.get(mode, ParseMode.DEFAULT)
+        parse_mode = _parse_mode_a_to_telethon.get(mode, ())
 
-        parse_result = await self.client.parser.parse(text, parse_mode)
-        message = parse_result["message"]
-        entities = _get_entities_with_layer(parse_result["entities"], layer)
+        message, entities = await self.client._parse_message_text(text, parse_mode)
+        entities = _get_entities_with_layer(entities, layer)
 
         return message, entities
 
     async def upload_file(self, file: EncryptedFileWrapper) -> InputFileA | InputFileBigA:
-        input_file: InputFile | InputFileBig = await self.client.save_file(file)
+        # TODO: telethon supports files encryption for secret chats,
+        #  maybe let libraries handle encryption (if supported)
+        input_file: InputFile | InputFileBig = await self.client.upload_file(file)
         if isinstance(input_file, InputFile):
             return InputFileA(
                 id=input_file.id,
@@ -187,10 +187,11 @@ class PyrogramClientAdapter(SecretClientAdapter):
         raise ValueError(f"Expected server to return InputFile or InputFileBig, got {input_file.__class__.__name__}")
 
     async def get_file_mime(self, file_name: str, file: BinaryIO) -> str:
-        return self.client.guess_mime_type(file_name)
+        _, mime = get_attributes(file)
+        return mime
 
     async def ack_qts(self, qts: int) -> None:
-        await self.client.invoke(ReceivedQueue(max_qts=qts))
+        await self.client(ReceivedQueueRequest(max_qts=qts))
 
     async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
         if isinstance(update, UpdateNewEncryptedMessage):
@@ -203,7 +204,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
                 message = EncryptedMessageA(
                     random_id=enc_message.random_id,
                     chat_id=enc_message.chat_id,
-                    date=enc_message.date,
+                    date=int(enc_message.date.timestamp()),
                     bytes=enc_message.bytes,
                     file=EncryptedFileA(
                         id=enc_file.id,
@@ -217,7 +218,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
                 message = EncryptedMessageServiceA(
                     random_id=enc_message.random_id,
                     chat_id=enc_message.chat_id,
-                    date=enc_message.date,
+                    date=int(enc_message.date.timestamp()),
                     bytes=enc_message.bytes,
                 )
             else:
@@ -236,7 +237,7 @@ class PyrogramClientAdapter(SecretClientAdapter):
             return await self.chat_requested_handler(EncryptedChatRequestedA(
                 id=chat.id,
                 access_hash=chat.access_hash,
-                date=chat.date,
+                date=int(chat.date.timestamp()),
                 admin_id=chat.admin_id,
                 participant_id=chat.participant_id,
                 g_a=chat.g_a,
@@ -259,7 +260,8 @@ class PyrogramClientAdapter(SecretClientAdapter):
 
     def _register_raw_handler_maybe(self) -> None:
         if not self.raw_handler_set:
-            self.client.on_raw_update()(self._raw_updates_handler)
+            self.client.on(events.Raw(UpdateEncryption))(self._raw_updates_handler)
+            self.client.on(events.Raw(UpdateNewEncryptedMessage))(self._raw_updates_handler)
             self.raw_handler_set = True
 
     def set_encrypted_message_handler(self, func: NewEncryptedMessageFuncT) -> None:
@@ -282,4 +284,4 @@ class PyrogramClientAdapter(SecretClientAdapter):
         return self.client.loop
 
     def get_session_name(self) -> str:
-        return self.client.name
+        return "telethon"
