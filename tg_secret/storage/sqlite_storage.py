@@ -188,5 +188,20 @@ class SQLiteStorage(BaseStorage):
         cols = next(zip(*cursor.description))
         return SecretChat(**dict(zip(cols, row)))
 
+    async def get_chat_by_peer(self, peer_id: int) -> SecretChat | None:
+        cursor = self.conn.execute(
+            "SELECT * FROM `secret_chats` WHERE (`admin_id`=? AND `originator`=0) OR (`participant_id`=? AND `originator`=1);",
+            (peer_id, peer_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        cols = next(zip(*cursor.description))
+        return SecretChat(**dict(zip(cols, row)))
+
     async def delete_chat(self, chat_id: int) -> None:
         self.conn.execute("DELETE FROM `secret_chats` WHERE `id`=?;", (chat_id,))
+
+    async def get_chat_ids(self) -> list[int]:
+        rows = self.conn.execute("SELECT `id` FROM `secret_chats`", ()).fetchall()
+        return [row[0] for row in rows]

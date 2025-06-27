@@ -170,5 +170,13 @@ class BaseStorage(ABC):
         ...
 
     @abstractmethod
+    async def get_chat_by_peer(self, peer_id: int) -> SecretChat | None:
+        ...
+
+    @abstractmethod
     async def delete_chat(self, chat_id: int) -> None:
+        ...
+
+    @abstractmethod
+    async def get_chat_ids(self) -> list[int]:
         ...

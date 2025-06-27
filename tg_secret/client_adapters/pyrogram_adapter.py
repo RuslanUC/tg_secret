@@ -3,7 +3,7 @@ from typing import cast, BinaryIO
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from pyrogram.raw.functions.messages import GetDhConfig, AcceptEncryption, DiscardEncryption, SendEncryptedService, \
-    SendEncrypted, SendEncryptedFile
+    SendEncrypted, SendEncryptedFile, ReceivedQueue
 from pyrogram.raw.types import InputEncryptedChat, EncryptedChat, MessageEntityBold, MessageEntityItalic, \
     MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, \
     MessageEntitySpoiler, MessageEntityTextUrl, MessageEntityCustomEmoji, UpdateNewEncryptedMessage, \
@@ -188,6 +188,9 @@ class PyrogramClientAdapter(SecretClientAdapter):
 
     async def get_file_mime(self, file_name: str, file: BinaryIO) -> str:
         return self.client.guess_mime_type(file_name)
+
+    async def ack_qts(self, qts: int) -> None:
+        await self.client.invoke(ReceivedQueue(max_qts=qts))
 
     async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
         if isinstance(update, UpdateNewEncryptedMessage):

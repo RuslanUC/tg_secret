@@ -10,7 +10,7 @@ from os.path import basename
 from pathlib import Path, PurePath
 from random import randint
 from time import time
-from typing import Awaitable, Any, Callable, cast, BinaryIO
+from typing import Awaitable, Any, Callable, cast, BinaryIO, AsyncGenerator
 
 from .aes import ige256_encrypt, ige256_decrypt
 from .client_adapters.base_adapter import DhConfigA, DhConfigNotModifiedA, InputEncryptedChatA, EncryptedMessageA, \
@@ -43,7 +43,6 @@ from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_in
 # TODO: add method to get secret chat by user id
 # TODO: logging
 # TODO: after a rekey, there is gap in in_seq_no
-# TODO: deleting messages
 
 ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
@@ -162,7 +161,7 @@ class TelegramSecretClient:
             self, message: EncryptedMessageA | EncryptedMessageServiceA, qts: int,
     ) -> None:
         await self._handle_encrypted_update(message)
-        # TODO: ack qts with receivedQueue()
+        await self._adapter.ack_qts(qts)
 
     async def _on_chat_updated_handler(self, chat: EncryptedChatA) -> None:
         ...  # TODO: mark chat as READY if local chat is WAITING
@@ -643,16 +642,15 @@ class TelegramSecretClient:
         if chat is None:
             return None
 
-        return TypesSecretChat(
-            chat_id=chat.id,
-            peer_id=chat.participant_id if chat.originator else chat.admin_id,
-            originator=chat.originator,
-            created_at=chat.created_at,
-            sent_messages=chat.out_seq_no,
-            recv_messages=chat.in_seq_no,
-            state=chat.state,
-            _client=self,
-        )
+        return TypesSecretChat._from_storage_chat(chat, self)
+
+    async def delete_messages(self, chat_id: int, random_id: int | list[int]) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionDeleteMessages(
+            random_ids=random_id if isinstance(random_id, list) else [random_id],
+        ))
+
+    async def delete_chat_history(self, chat_id: int) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionFlushHistory())
 
     async def _send_chat_message(
             self,
@@ -837,3 +835,20 @@ class TelegramSecretClient:
             chat, message, input_file, key_fp, media, entities, ttl, disable_web_page_preview, disable_notification,
             via_bot_name, reply_to_message_id,
         )
+
+    async def get_chat_ids(self) -> list[int]:
+        return await self._storage.get_chat_ids()
+
+    async def iter_chats(self) -> AsyncGenerator[SecretChat, None, None]:
+        for chat_id in await self.get_chat_ids():
+            yield await self._storage.get_chat(chat_id)
+
+    async def get_chats(self) -> list[SecretChat]:
+        return list(chat async for chat in self.iter_chats())
+
+    async def get_chat_by_user(self, peer_id: int) -> SecretChat | None:
+        chat = await self._storage.get_chat_by_peer(peer_id)
+        if chat is None:
+            return None
+
+        return TypesSecretChat._from_storage_chat(chat, self)

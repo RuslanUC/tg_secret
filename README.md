@@ -11,6 +11,9 @@ Currently, following critical features are not implemented:
 
 ### Example with pyrogram
 ```python
+from asyncio import sleep
+from io import BytesIO
+
 from pyrogram import Client
 from pyrogram.types import User
 
@@ -49,6 +52,15 @@ async def new_secret_message(message: SecretMessage) -> None:
         await secret.send_document(
             message.chat.id, BytesIO(b"test 123"), caption="Here's your file", file_name="test.txt"
         )
+        return
+    elif message.text == "/delete_message":
+        message_to_delete = await message.reply("This message will be deleted in 5 seconds")
+        await sleep(5)
+        await message_to_delete.delete()
+        return
+    elif message.text == "/delete_history":
+        await message.chat.delete_history()
+        await message.chat.send_message("History was deleted")
         return
 
     await message.reply(f"**{message.text}**")

@@ -134,6 +134,10 @@ class SecretClientAdapter(ABC):
         ...
 
     @abstractmethod
+    async def ack_qts(self, qts: int) -> None:
+        ...
+
+    @abstractmethod
     def set_encrypted_message_handler(self, func: NewEncryptedMessageFuncT) -> None:
         ...
 

@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 
 class SecretMessage:
-    # TODO: convert entities to pyrogram/telethon entities
+    # TODO: convert entities to pyrogram/telethon entities ??
     # TODO: media
 
     def __init__(
@@ -25,7 +25,7 @@ class SecretMessage:
         self._client = _client
 
     async def delete(self) -> None:
-        ...  # TODO: delete message
+        await self._client.delete_messages(self.chat.id, self.id)
 
     async def reply(
             self,
