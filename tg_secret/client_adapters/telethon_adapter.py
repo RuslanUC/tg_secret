@@ -1,3 +1,4 @@
+import warnings
 from typing import cast, BinaryIO
 
 from telethon import TelegramClient, events
@@ -31,7 +32,7 @@ _parse_mode_a_to_telethon = {
 }
 
 
-_pyrogram_entities_mapping = {
+_entities_mapping = {
     MessageEntityBold: SecretEntityBold,
     MessageEntityItalic: SecretEntityItalic,
     MessageEntityUnderline: SecretEntityUnderline,
@@ -58,7 +59,7 @@ def _get_entities_with_layer(entities: list[...], peer_layer: int) -> list[Messa
 
     result = []
     for entity in entities:
-        secret_entity_cls = _pyrogram_entities_mapping.get(type(entity))
+        secret_entity_cls = _entities_mapping.get(type(entity))
         if secret_entity_cls is None:
             continue
         if _entities_min_layers.get(secret_entity_cls, 0) > peer_layer:
@@ -73,13 +74,16 @@ def _get_entities_with_layer(entities: list[...], peer_layer: int) -> list[Messa
     return result
 
 
-class PyrogramClientAdapter(SecretClientAdapter):
+class TelethonClientAdapter(SecretClientAdapter):
     __slots__ = (
         "client", "new_message_handler", "chat_update_handler", "chat_requested_handler", "chat_discarded_handler",
         "raw_handler_set",
     )
 
     def __init__(self, client: TelegramClient):
+        # TODO: remove warning when telethon adapter is tested
+        warnings.warn("Telethon client adapter is not tested yet, it may work incorrectly or be completely broken.")
+
         self.client = client
         self.new_message_handler: NewEncryptedMessageFuncT | None = None
         self.chat_update_handler: NewChatUpdateFuncT | None = None
