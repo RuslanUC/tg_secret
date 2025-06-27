@@ -16,16 +16,12 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with Pyrogram.  If not, see <http://www.gnu.org/licenses/>.
 
-import json
-import os
 import re
 import shutil
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
 
-# from autoflake import fix_code
-# from black import format_str, FileMode
 
 HOME_PATH = Path("compiler/secret_api")
 DESTINATION_PATH = Path("tg_secret/raw")
@@ -286,11 +282,11 @@ def start():
                 write_flags = "\n        ".join([
                     f"{arg_name} = 0",
                     "\n        ".join(write_flags),
-                    f"b.write(Int({arg_name}))\n        "
+                    f"b.write(write_int({arg_name}))\n        "
                 ])
 
                 write_types += write_flags
-                read_types += f"\n        {arg_name} = Int.read(b)\n        "
+                read_types += f"\n        {arg_name} = read_int(b)\n        "
 
                 continue
 
@@ -303,22 +299,23 @@ def start():
                 elif flag_type in CORE_TYPES:
                     write_types += "\n        "
                     write_types += f"if self.{arg_name} is not None:\n            "
-                    write_types += f"b.write({flag_type.title()}(self.{arg_name}))\n        "
+                    write_types += f"b.write(write_{flag_type.lower()}(self.{arg_name}))\n        "
 
                     read_types += "\n        "
-                    read_types += f"{arg_name} = {flag_type.title()}.read(b) if flags{number} & (1 << {index}) else None"
+                    read_types += f"{arg_name} = read_{flag_type.lower()}(b) if flags{number} & (1 << {index}) else None"
                 elif "vector" in flag_type.lower():
                     sub_type = arg_type.split("<")[1][:-1]
 
                     write_types += "\n        "
                     write_types += f"if self.{arg_name} is not None:\n            "
-                    write_types += "b.write(Vector(self.{}{}))\n        ".format(
-                        arg_name, f", {sub_type.title()}" if sub_type in CORE_TYPES else ""
+                    write_types += "b.write(Vector.write_{}(self.{}{}))\n        ".format(
+                        "primitive_list" if sub_type in CORE_TYPES else "list",
+                        arg_name, f", write_{sub_type.lower()}" if sub_type in CORE_TYPES else ""
                     )
 
                     read_types += "\n        "
                     read_types += "{} = SecretTLObject.read(b{}) if flags{} & (1 << {}) else []\n        ".format(
-                        arg_name, f", {sub_type.title()}" if sub_type in CORE_TYPES else "", number, index
+                        arg_name, f", read_{sub_type.lower()}" if sub_type in CORE_TYPES else ", SecretTLObject.read", number, index
                     )
                 else:
                     write_types += "\n        "
@@ -330,21 +327,22 @@ def start():
             else:
                 if arg_type in CORE_TYPES:
                     write_types += "\n        "
-                    write_types += f"b.write({arg_type.title()}(self.{arg_name}))\n        "
+                    write_types += f"b.write(write_{arg_type.lower()}(self.{arg_name}))\n        "
 
                     read_types += "\n        "
-                    read_types += f"{arg_name} = {arg_type.title()}.read(b)\n        "
+                    read_types += f"{arg_name} = read_{arg_type.lower()}(b)\n        "
                 elif "vector" in arg_type.lower():
                     sub_type = arg_type.split("<")[1][:-1]
 
                     write_types += "\n        "
-                    write_types += "b.write(Vector(self.{}{}))\n        ".format(
-                        arg_name, f", {sub_type.title()}" if sub_type in CORE_TYPES else ""
+                    write_types += "b.write(Vector.write_{}(self.{}{}))\n        ".format(
+                        "primitive_list" if sub_type in CORE_TYPES else "list",
+                        arg_name, f", write_{sub_type.lower()}" if sub_type in CORE_TYPES else ""
                     )
 
                     read_types += "\n        "
-                    read_types += "{} = SecretTLObject.read(b{})\n        ".format(
-                        arg_name, f", {sub_type.title()}" if sub_type in CORE_TYPES else ""
+                    read_types += "{} = Vector.read(b{})\n        ".format(
+                        arg_name, f", read_{sub_type.lower()}" if sub_type in CORE_TYPES else ", SecretTLObject.read"
                     )
                 else:
                     write_types += "\n        "
@@ -361,7 +359,7 @@ def start():
             warning=WARNING,
             name=c.name,
             docstring=docstring,
-            slots=slots,
+            slots=f"{slots}," if slots else "",
             id=c.id,
             qualname=f"types.{c.qualname}",
             arguments=arguments,
@@ -399,8 +397,10 @@ def start():
             f.write("\n")
             f.write("from io import BytesIO\n")
             f.write("\n")
-            f.write("from pyrogram.raw.core.primitives import Int, Long, Int128, Int256, Bool, Bytes, String, Double, Vector\n")
             f.write("from tg_secret.raw.tl_object import SecretTLObject\n")
+            f.write("from tg_secret.raw.vector import Vector\n")
+            f.write("from tg_secret.raw.primitives import read_int, read_long, read_double, read_bytes, read_string\n")
+            f.write("from tg_secret.raw.primitives import write_int, write_long, write_double, write_bytes, write_string\n")
             f.write("from tg_secret import raw\n")
             f.write("\n")
             f.write(f"{WARNING}\n\n")
@@ -411,32 +411,22 @@ def start():
 
     with open(DESTINATION_PATH / "all.py", "w", encoding="utf-8") as f:
         f.write("from io import BytesIO\n")
-        f.write("from typing import Any\n\n")
-        f.write("import pyrogram.raw\n\n")
         f.write("import tg_secret.raw\n\n")
 
         f.write(WARNING + "\n\n")
 
         f.write(f"layer = {max_layer}\n\n")
 
-        f.write("class SecretVector(pyrogram.raw.core.Vector):\n")
-        f.write("    @staticmethod\n")
-        f.write("    def read_bare(b: BytesIO, size: int) -> int | Any:\n")
-        f.write("        if size == 4: return pyrogram.raw.core.Int.read(b)\n")
-        f.write("        if size == 8: return pyrogram.raw.core.Long.read(b)\n")
-        f.write("        return tg_secret.raw.SecretTLObject.read(b)\n")
-        f.write("\n\n")
-
-        f.write("objects = {")
+        f.write("objects = {\n")
 
         for c in combinators:
-            f.write(f'\n    {c.id}: tg_secret.raw.types.{c.qualname},')
+            f.write(f"    {c.id}: tg_secret.raw.types.{c.qualname},\n")
 
-        f.write('\n    0xbc799737: pyrogram.raw.core.BoolFalse,')
-        f.write('\n    0x997275b5: pyrogram.raw.core.BoolTrue,')
-        f.write('\n    0x1cb5c415: SecretVector')
+        f.write("    0xbc799737: tg_secret.raw.primitives.BoolFalse,\n")
+        f.write("    0x997275b5: tg_secret.raw.primitives.BoolTrue,\n")
+        f.write("    0x1cb5c415: tg_secret.raw.vector.Vector,\n")
 
-        f.write("\n}\n")
+        f.write("}\n")
 
 
 if "__main__" == __name__:

@@ -45,6 +45,11 @@ async def new_secret_message(message: SecretMessage) -> None:
         await message.reply("Discarding chat...")
         await message.chat.delete(delete_history=False)
         return
+    elif message.text == "/file":
+        await secret.send_document(
+            message.chat.id, BytesIO(b"test 123"), caption="Here's your file", file_name="test.txt"
+        )
+        return
 
     await message.reply(f"**{message.text}**")
 

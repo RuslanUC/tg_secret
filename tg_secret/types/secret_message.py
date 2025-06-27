@@ -2,17 +2,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pyrogram.enums import ParseMode
-
-from tg_secret.raw.base import MessageEntity
-
 if TYPE_CHECKING:
-    from tg_secret import TelegramSecretClient, SecretChat
+    from tg_secret import TelegramSecretClient, SecretChat, ParseMode
+    from tg_secret.raw.base import MessageEntity
 
 
 class SecretMessage:
-    # TODO: convert entities to pyrogram entities
+    # TODO: convert entities to pyrogram/telethon entities
     # TODO: media
+
     def __init__(
             self, random_id: int, chat: SecretChat, from_id: int, text: str, entities: list[MessageEntity],
             reply_to_random_id: int | None,

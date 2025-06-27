@@ -42,8 +42,8 @@ from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_in
 # TODO: add method to request secret chat
 # TODO: add method to get secret chat by user id
 # TODO: logging
-# TODO: make tl-compiled classes not depend on pyrogram
 # TODO: after a rekey, there is gap in in_seq_no
+# TODO: deleting messages
 
 ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
@@ -738,7 +738,7 @@ class TelegramSecretClient:
 
         message, entities = await self._adapter.parse_entities_for_layer(text, chat.peer_layer, parse_mode)
 
-        return self._send_chat_message(
+        return await self._send_chat_message(
             chat, message, None, None, None, entities, ttl, disable_web_page_preview, disable_notification,
             via_bot_name, reply_to_message_id,
         )

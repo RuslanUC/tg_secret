@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pyrogram.enums import ParseMode
-
 if TYPE_CHECKING:
-    from tg_secret import TelegramSecretClient, SecretMessage, ChatState
+    from tg_secret import TelegramSecretClient, SecretMessage, ChatState, ParseMode
 
 
 class SecretChat:

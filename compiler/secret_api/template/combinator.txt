@@ -2,7 +2,7 @@ class {name}(SecretTLObject):  # type: ignore
     """{docstring}
     """
 
-    __slots__: list[str] = [{slots}]
+    __slots__ = ({slots})
 
     ID = {id}
     QUALNAME = "{qualname}"
@@ -17,7 +17,7 @@ class {name}(SecretTLObject):  # type: ignore
 
     def write(self) -> bytes:
         b = BytesIO()
-        b.write(Int(self.ID, False))
+        b.write(write_int(self.ID, False))
 
         {write_types}
         return b.getvalue()
