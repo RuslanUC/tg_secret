@@ -14,7 +14,8 @@ from typing import Awaitable, Any, Callable, cast, BinaryIO
 
 from .aes import ige256_encrypt, ige256_decrypt
 from .client_adapters.base_adapter import DhConfigA, DhConfigNotModifiedA, InputEncryptedChatA, EncryptedMessageA, \
-    EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter, InputFileA, InputFileBigA
+    EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter, InputFileA, InputFileBigA, \
+    EncryptedFileA
 from .client_adapters.pyrogram_adapter import PyrogramClientAdapter
 from .encrypted_file_wrapper import EncryptedFileWrapper
 from .enums import ChatState, ChatRequestResult, ParseMode
@@ -35,10 +36,11 @@ from .types import SecretChat as TypesSecretChat, SecretMessage
 from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_int
 
 # TODO: replace client.log_out to also remove secret database file
-# TODO: allow using same session file as pyrogram
+# TODO: allow using same session file as pyrogram/telethon
 # TODO: support multiple libraries (pyrogram/pyrotgfork/hydrogram/telethon) at the same time
 # TODO: add method to list secret chats
 # TODO: add method to request secret chat
+# TODO: add method to get secret chat by user id
 # TODO: logging
 # TODO: make tl-compiled classes not depend on pyrogram
 # TODO: after a rekey, there is gap in in_seq_no
@@ -410,9 +412,13 @@ class TelegramSecretClient:
 
         await self._maybe_start_rekeying(chat)
 
-    async def _handle_encrypted_update(self, message: EncryptedMessageA | EncryptedMessageServiceA) -> None:
-        # TODO: handle files
+    @staticmethod
+    def _get_file_key_fp(key: bytes, iv: bytes) -> int:
+        key_digest = md5(key + iv).digest()
+        key_fp_bytes = bytes(a ^ b for a, b in zip(key_digest[:4], key_digest[4:8]))
+        return read_int(key_fp_bytes)
 
+    async def _handle_encrypted_update(self, message: EncryptedMessageA | EncryptedMessageServiceA) -> None:
         if isinstance(message, EncryptedMessageServiceA):
             message = cast(EncryptedMessageServiceA, message)
             is_service = True
@@ -486,7 +492,7 @@ class TelegramSecretClient:
                 raise ValueError(
                     f"Expected DecryptedMessage, got {obj.message.__class__.__name__}"
                 )
-            await self._handle_encrypted_message(chat.id, obj.message)
+            await self._handle_encrypted_message(chat.id, obj.message, file)
 
         await self._maybe_start_rekeying(chat)
 
@@ -605,8 +611,11 @@ class TelegramSecretClient:
             raise ValueError(f"Excepted DecryptedMessageAction, got {action.__class__.__name__}")
 
     async def _handle_encrypted_message(
-            self, chat_id: int,
+            self,
+            chat_id: int,
             message: DecryptedMessage_8 | DecryptedMessage_17 | DecryptedMessage_45 | DecryptedMessage_73,
+            # TODO: add media in SecretMessage
+            file: EncryptedFileA | None,
     ) -> None:
         if isinstance(message, (DecryptedMessage_73, DecryptedMessage_45)):
             reply_to = message.reply_to_random_id
@@ -712,7 +721,6 @@ class TelegramSecretClient:
             _client=self,
         )
 
-    # TODO: allow sending by user id instead of chat id
     async def send_text_message(
             self,
             chat_id: int,
@@ -735,7 +743,6 @@ class TelegramSecretClient:
             via_bot_name, reply_to_message_id,
         )
 
-    # TODO: allow sending by user id instead of chat id
     async def send_document(
             self,
             chat_id: int,
@@ -756,9 +763,7 @@ class TelegramSecretClient:
         key = urandom(32)
         iv = urandom(32)
 
-        key_digest = md5(key + iv).digest()
-        key_fp_bytes = bytes(a ^ b for a, b in zip(key_digest[:4], key_digest[4:8]))
-        key_fp = read_int(key_fp_bytes)
+        key_fp = self._get_file_key_fp(key, iv)
 
         with ExitStack() as exit_stack:
             if isinstance(file, (str, PurePath)):
