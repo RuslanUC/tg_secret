@@ -1,6 +1,9 @@
 # tg-secret
 
-This library provides secret chat support for pyrogram.
+This library provides secret chat support for python Telegram (MTProto) client libraries.
+Currently, tg-secret supports [Pyrogram](https://github.com/pyrogram/pyrogram) and [Telethon](https://github.com/LonamiWebs/Telethon) (not tested), 
+but any library can be supported by creating client adapter implementing tg_secret.SecretClientAdapter class.
+
 It is work-in-progress and not recommended to use in production yet.
 Currently, following critical features are not implemented:
  - Proper gaps handling: if gaps were detected locally, they are just ignored; also DecryptedMessageActionResend is ignored, so if remote detected gaps, it won't be able to fill them

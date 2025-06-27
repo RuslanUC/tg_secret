@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "tg-secret"
 version = "0.1.0"
-description = "Secret chats support for pyrogram"
+description = "Secret chats support for Telegram (MTProto) client libraries"
 authors = ["RuslanUC <dev_ruslan_uc@protonmail.com>"]
 readme = "README.md"
 license = "MIT"
