@@ -1,20 +1,22 @@
-from typing import cast
+from typing import cast, BinaryIO
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from pyrogram.raw.functions.messages import GetDhConfig, AcceptEncryption, DiscardEncryption, SendEncryptedService, \
-    SendEncrypted
+    SendEncrypted, SendEncryptedFile
 from pyrogram.raw.types import InputEncryptedChat, EncryptedChat, MessageEntityBold, MessageEntityItalic, \
     MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, \
     MessageEntitySpoiler, MessageEntityTextUrl, MessageEntityCustomEmoji, UpdateNewEncryptedMessage, \
     UpdateEncryption, EncryptedMessage, EncryptedMessageService, EncryptedFile, EncryptedFileEmpty, \
-    EncryptedChatRequested, EncryptedChatDiscarded
+    EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig, InputEncryptedFile, \
+    InputEncryptedFileUploaded, InputEncryptedFileBigUploaded
 from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified
 
 from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
     DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
     EncryptedMessageServiceA, EncryptedFileA, NewChatUpdateFuncT, NewChatRequestedFuncT, NewChatDiscardedFuncT, \
-    EncryptedChatRequestedA
+    EncryptedChatRequestedA, InputFileA, InputFileBigA
+from tg_secret.encrypted_file_wrapper import EncryptedFileWrapper
 from tg_secret.raw.base import MessageEntity
 from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEntityItalic as SecretEntityItalic, \
     MessageEntityUnderline as SecretEntityUnderline, MessageEntityStrike as SecretEntityStrike, \
@@ -129,6 +131,34 @@ class PyrogramClientAdapter(SecretClientAdapter):
             data=data,
         ))
 
+    async def send_encrypted_file(
+            self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool,
+            file: InputFileA | InputFileBigA, key_fingerprint: int,
+    ) -> None:
+        if isinstance(file, InputFileA):
+            input_file = InputEncryptedFileUploaded(
+                id=file.id,
+                parts=file.parts,
+                md5_checksum=file.md5_checksum,
+                key_fingerprint=key_fingerprint,
+            )
+        elif isinstance(file, InputFileBigA):
+            input_file = InputEncryptedFileBigUploaded(
+                id=file.id,
+                parts=file.parts,
+                key_fingerprint=key_fingerprint,
+            )
+        else:
+            raise ValueError(f"Expected InputFileUploadedA or InputFileBigUploadedA, got {file.__class__.__name__}")
+
+        await self.client.invoke(SendEncryptedFile(
+            peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
+            random_id=random_id,
+            data=data,
+            file=input_file,
+            silent=silent,
+        ))
+
     async def parse_entities_for_layer(
             self, text: str, layer: int, mode: ParseModeA,
     ) -> tuple[str, list[MessageEntity]]:
@@ -139,6 +169,25 @@ class PyrogramClientAdapter(SecretClientAdapter):
         entities = _get_entities_with_layer(parse_result["entities"], layer)
 
         return message, entities
+
+    async def upload_file(self, file: EncryptedFileWrapper) -> InputFileA | InputFileBigA:
+        input_file: InputFile | InputFileBig = await self.client.save_file(file)
+        if isinstance(input_file, InputFile):
+            return InputFileA(
+                id=input_file.id,
+                parts=input_file.parts,
+                md5_checksum=input_file.md5_checksum,
+            )
+        elif isinstance(input_file, InputFileBig):
+            return InputFileBigA(
+                id=input_file.id,
+                parts=input_file.parts,
+            )
+
+        raise ValueError(f"Expected server to return InputFile or InputFileBig, got {input_file.__class__.__name__}")
+
+    async def get_file_mime(self, file_name: str, file: BinaryIO) -> str:
+        return self.client.guess_mime_type(file_name)
 
     async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
         if isinstance(update, UpdateNewEncryptedMessage):

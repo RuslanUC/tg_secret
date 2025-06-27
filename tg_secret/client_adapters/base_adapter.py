@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, BinaryIO
 
+from tg_secret.encrypted_file_wrapper import EncryptedFileWrapper
 from tg_secret.enums import ParseMode as ParseModeA
 from tg_secret.raw.base import MessageEntity
 
@@ -69,6 +70,19 @@ class EncryptedChatRequestedA:
     g_a: bytes
 
 
+@dataclass(slots=True)
+class InputFileA:
+    id: int
+    parts: int
+    md5_checksum: str
+
+
+@dataclass(slots=True)
+class InputFileBigA:
+    id: int
+    parts: int
+
+
 NewEncryptedMessageFuncT = Callable[[EncryptedMessageA | EncryptedMessageServiceA, int], Awaitable[Any]]
 NewChatUpdateFuncT = Callable[[EncryptedChatA], Awaitable[Any]]
 NewChatRequestedFuncT = Callable[[EncryptedChatRequestedA], Awaitable[Any]]
@@ -99,9 +113,24 @@ class SecretClientAdapter(ABC):
         ...
 
     @abstractmethod
+    async def send_encrypted_file(
+            self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool,
+            file: InputFileA | InputFileBigA, key_fingerprint: int,
+    ) -> None:
+        ...
+
+    @abstractmethod
     async def parse_entities_for_layer(
             self, text: str, layer: int, mode: ParseModeA,
     ) -> tuple[str, list[MessageEntity]]:
+        ...
+
+    @abstractmethod
+    async def upload_file(self, file: EncryptedFileWrapper) -> InputFileA | InputFileBigA:
+        ...
+
+    @abstractmethod
+    async def get_file_mime(self, file_name: str, file: BinaryIO) -> str:
         ...
 
     @abstractmethod

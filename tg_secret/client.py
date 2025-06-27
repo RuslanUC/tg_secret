@@ -1,29 +1,35 @@
 from __future__ import annotations
 
+import io
 import sys
-from hashlib import sha1
-from io import BytesIO
+from contextlib import ExitStack
+from hashlib import sha1, md5
+from io import BytesIO, IOBase
 from os import urandom
-from pathlib import Path
+from os.path import basename
+from pathlib import Path, PurePath
 from random import randint
 from time import time
-from typing import Awaitable, Any, Callable, cast
+from typing import Awaitable, Any, Callable, cast, BinaryIO
 
 from .aes import ige256_encrypt, ige256_decrypt
 from .client_adapters.base_adapter import DhConfigA, DhConfigNotModifiedA, InputEncryptedChatA, EncryptedMessageA, \
-    EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter
+    EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter, InputFileA, InputFileBigA
 from .client_adapters.pyrogram_adapter import PyrogramClientAdapter
+from .encrypted_file_wrapper import EncryptedFileWrapper
 from .enums import ChatState, ChatRequestResult, ParseMode
 from .exceptions import SecretChatNotReadyException, SecretLayerException, SecretSecurityException
 from .raw import SecretTLObject
 from .raw.all import layer
+from .raw.base import DecryptedMessageAction, MessageEntity, DecryptedMessageMedia
 from .raw.types import DecryptedMessageService_17, DecryptedMessageActionNotifyLayer, DecryptedMessageLayer, \
     DecryptedMessageService_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73, DecryptedMessage_8, \
     DecryptedMessageActionAbortKey, DecryptedMessageActionAcceptKey, DecryptedMessageActionCommitKey, \
     DecryptedMessageActionDeleteMessages, DecryptedMessageActionFlushHistory, DecryptedMessageActionNoop, \
     DecryptedMessageActionReadMessages, DecryptedMessageActionRequestKey, DecryptedMessageActionResend, \
     DecryptedMessageActionScreenshotMessages, DecryptedMessageActionSetMessageTTL, DecryptedMessageActionTyping, \
-    DecryptedMessageMediaEmpty
+    DecryptedMessageMediaEmpty, DecryptedMessageMediaDocument_143, DocumentAttributeFilename, \
+    DecryptedMessageMediaDocument_45, DecryptedMessageMediaDocument_8
 from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, SecretChat
 from .types import SecretChat as TypesSecretChat, SecretMessage
 from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_int
@@ -310,8 +316,7 @@ class TelegramSecretClient:
         await self._storage.update_chat(chat, a=a_bytes, exchange_id=exchange_id)
         await self._send_service_message(chat_id, DecryptedMessageActionRequestKey(exchange_id=exchange_id, g_a=g_a))
 
-    # TODO: properly annotate action
-    async def _send_service_message(self, chat_id: int, action: SecretTLObject) -> None:
+    async def _send_service_message(self, chat_id: int, action: DecryptedMessageAction) -> None:
         random_id = read_long(urandom(8))
         await self._send_message(
             chat_id,
@@ -350,9 +355,14 @@ class TelegramSecretClient:
         if (chat.key_used > 100 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
             await self.rekey(chat.id)
 
-    # TODO: SendEncryptedFile
     async def _send_message(
-            self, chat_id: int, decrypted_message: SecretTLObject, random_id: int, *,
+            self,
+            chat_id: int,
+            decrypted_message: SecretTLObject,
+            random_id: int,
+            file: InputFileA | InputFileBigA | None = None,
+            file_key_fp: int | None = None,
+            *,
             silent: bool = False,
     ) -> None:
         chat = await self._storage.get_chat(chat_id)
@@ -388,7 +398,11 @@ class TelegramSecretClient:
         if isinstance(decrypted_message, decrypted_message_service_clss):
             await self._adapter.send_encrypted_service(peer, random_id, final_payload)
         elif isinstance(decrypted_message, decrypted_message_clss):
-            await self._adapter.send_encrypted(peer, random_id, final_payload, silent)
+            if file is not None and file_key_fp is not None:
+                # TODO: get file id and access hash to be able to download/forward file
+                await self._adapter.send_encrypted_file(peer, random_id, final_payload, silent, file, file_key_fp)
+            else:
+                await self._adapter.send_encrypted(peer, random_id, final_payload, silent)
         else:
             raise ValueError(
                 f"Expected DecryptedMessage or DecryptedMessageService, got {decrypted_message.__class__.__name__}"
@@ -631,6 +645,73 @@ class TelegramSecretClient:
             _client=self,
         )
 
+    async def _send_chat_message(
+            self,
+            chat: SecretChat,
+            text: str,
+            file: InputFileA | InputFileBigA | None,
+            file_key_fp: int | None,
+            media: DecryptedMessageMedia | None,
+            entities: list[MessageEntity],
+            ttl: int,
+            disable_web_page_preview: bool,
+            disable_notification: bool,
+            via_bot_name: str | None,
+            reply_to_random_id: int | None,
+    ) -> ...:
+        random_id = read_long(urandom(8))
+        if chat.peer_layer >= 73:
+            request = DecryptedMessage_73(
+                random_id=random_id,
+                message=text,
+                entities=entities or None,
+                ttl=ttl,
+                no_webpage=disable_web_page_preview,
+                via_bot_name=via_bot_name,
+                reply_to_random_id=reply_to_random_id,
+                media=media,
+            )
+        elif chat.peer_layer >= 45:
+            request = DecryptedMessage_45(
+                random_id=random_id,
+                message=text,
+                entities=entities or None,
+                ttl=ttl,
+                via_bot_name=via_bot_name,
+                reply_to_random_id=reply_to_random_id,
+                media=media,
+            )
+        elif chat.peer_layer >= 17:
+            reply_to_random_id = None
+            request = DecryptedMessage_17(
+                random_id=random_id,
+                message=text,
+                ttl=ttl,
+                media=media or DecryptedMessageMediaEmpty(),
+            )
+        elif chat.peer_layer >= 8:
+            reply_to_random_id = None
+            request = DecryptedMessage_8(
+                random_id=random_id,
+                message=text,
+                random_bytes=urandom(16),
+                media=media or DecryptedMessageMediaEmpty(),
+            )
+        else:
+            raise SecretLayerException("messages (?)", chat.peer_layer, 8)
+
+        await self._send_message(chat.id, request, random_id, file, file_key_fp, silent=disable_notification)
+
+        return SecretMessage(
+            random_id=random_id,
+            chat=await self.get_chat(chat.id),
+            from_id=chat.admin_id if chat.originator else chat.participant_id,
+            text=text,
+            entities=entities,
+            reply_to_random_id=reply_to_random_id,
+            _client=self,
+        )
+
     # TODO: allow sending by user id instead of chat id
     async def send_text_message(
             self,
@@ -649,53 +730,105 @@ class TelegramSecretClient:
 
         message, entities = await self._adapter.parse_entities_for_layer(text, chat.peer_layer, parse_mode)
 
-        random_id = read_long(urandom(8))
-        if chat.peer_layer >= 73:
-            request = DecryptedMessage_73(
-                random_id=random_id,
-                message=message,
-                entities=entities or None,
-                ttl=ttl,
-                no_webpage=disable_web_page_preview,
-                via_bot_name=via_bot_name,
-                reply_to_random_id=reply_to_message_id,
+        return self._send_chat_message(
+            chat, message, None, None, None, entities, ttl, disable_web_page_preview, disable_notification,
+            via_bot_name, reply_to_message_id,
+        )
+
+    # TODO: allow sending by user id instead of chat id
+    async def send_document(
+            self,
+            chat_id: int,
+            file: str | BinaryIO,
+            caption: str | None = None,
+            ttl: int = 0,
+            disable_web_page_preview: bool = False,
+            disable_notification: bool = False,
+            via_bot_name: str | None = None,
+            reply_to_message_id: int | None = None,
+            parse_mode: ParseMode | None = None,
+            file_name: str | None = None,
+    ) -> SecretMessage:
+        chat = await self._storage.get_chat(chat_id)
+        if chat.state is not ChatState.READY:
+            raise SecretChatNotReadyException
+
+        key = urandom(32)
+        iv = urandom(32)
+
+        key_digest = md5(key + iv).digest()
+        key_fp_bytes = bytes(a ^ b for a, b in zip(key_digest[:4], key_digest[4:8]))
+        key_fp = read_int(key_fp_bytes)
+
+        with ExitStack() as exit_stack:
+            if isinstance(file, (str, PurePath)):
+                fp = open(file, "rb")
+                exit_stack.enter_context(fp)
+                file_name = file_name or basename(file)
+            elif isinstance(file, IOBase):
+                fp = file
+                file_name = file_name or getattr(file, "name", "unknown.bin")
+            else:
+                raise ValueError("Invalid file. Expected a file path as string or a binary (not text) file pointer")
+
+            fp.seek(0, io.SEEK_END)
+            file_size = fp.tell()
+            fp.seek(0)
+
+            wrapper = EncryptedFileWrapper(fp, key, iv, True)
+            input_file = await self._adapter.upload_file(wrapper)
+
+        if caption:
+            message, entities = await self._adapter.parse_entities_for_layer(caption, chat.peer_layer, parse_mode)
+        else:
+            message = ""
+            entities = []
+
+        mime_type = await self._adapter.get_file_mime(file_name, fp)
+        fp.seek(0)
+
+        if chat.peer_layer >= 143:
+            media = DecryptedMessageMediaDocument_143(
+                # TODO: document thumbnail
+                thumb=b"",
+                thumb_w=0,
+                thumb_h=0,
+                mime_type=mime_type,
+                size=file_size,
+                key=key,
+                iv=iv,
+                attributes=[DocumentAttributeFilename(file_name=file_name)],
+                caption=message,
             )
         elif chat.peer_layer >= 45:
-            request = DecryptedMessage_45(
-                random_id=random_id,
-                message=message,
-                entities=entities or None,
-                ttl=ttl,
-                via_bot_name=via_bot_name,
-                reply_to_random_id=reply_to_message_id,
-            )
-        elif chat.peer_layer >= 17:
-            reply_to_message_id = None
-            request = DecryptedMessage_17(
-                random_id=random_id,
-                message=message,
-                ttl=ttl,
-                media=DecryptedMessageMediaEmpty(),
+            media = DecryptedMessageMediaDocument_45(
+                # TODO: document thumbnail
+                thumb=b"",
+                thumb_w=0,
+                thumb_h=0,
+                mime_type=mime_type,
+                size=file_size,
+                key=key,
+                iv=iv,
+                attributes=[DocumentAttributeFilename(file_name=file_name)],
+                caption=message,
             )
         elif chat.peer_layer >= 8:
-            reply_to_message_id = None
-            request = DecryptedMessage_8(
-                random_id=random_id,
-                message=message,
-                random_bytes=urandom(16),
-                media=DecryptedMessageMediaEmpty(),
+            media = DecryptedMessageMediaDocument_8(
+                # TODO: document thumbnail
+                thumb=b"",
+                thumb_w=0,
+                thumb_h=0,
+                file_name=file_name,
+                mime_type=mime_type,
+                size=file_size,
+                key=key,
+                iv=iv,
             )
         else:
-            raise SecretLayerException("messages (?)", chat.peer_layer, 8)
+            raise SecretLayerException("media", chat.peer_layer, 8)
 
-        await self._send_message(chat_id, request, random_id, silent=disable_notification)
-
-        return SecretMessage(
-            random_id=random_id,
-            chat=await self.get_chat(chat.id),
-            from_id=chat.admin_id if chat.originator else chat.participant_id,
-            text=message,
-            entities=entities,
-            reply_to_random_id=reply_to_message_id,
-            _client=self,
+        return await self._send_chat_message(
+            chat, message, input_file, key_fp, media, entities, ttl, disable_web_page_preview, disable_notification,
+            via_bot_name, reply_to_message_id,
         )
