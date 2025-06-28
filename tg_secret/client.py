@@ -15,10 +15,10 @@ from typing import Awaitable, Any, Callable, cast, BinaryIO, AsyncGenerator
 from .aes import ige256_encrypt, ige256_decrypt
 from .client_adapters.base_adapter import DhConfigA, DhConfigNotModifiedA, InputEncryptedChatA, EncryptedMessageA, \
     EncryptedMessageServiceA, EncryptedChatA, EncryptedChatRequestedA, SecretClientAdapter, InputFileA, InputFileBigA, \
-    EncryptedFileA
+    EncryptedFileA, InputExistingFileA
 from .client_adapters.pyrogram_adapter import PyrogramClientAdapter
 from .encrypted_file_wrapper import EncryptedFileWrapper
-from .enums import ChatState, ChatRequestResult, ParseMode
+from .enums import ChatState, ChatRequestResult, ParseMode, GapsStrategy
 from .exceptions import SecretChatNotReadyException, SecretLayerException, SecretSecurityException
 from .raw import SecretTLObject
 from .raw.all import layer
@@ -57,12 +57,14 @@ class TelegramSecretClient:
             session_name: str | None = None,
             workdir: Path = Path(sys.argv[0]).parent,
             in_memory: bool = False,
+            gaps_strategy: GapsStrategy = GapsStrategy.FILL,
     ) -> None:
         self._adapter = client_adapter
 
         self._loop = client_adapter.get_event_loop()
         self._name = session_name or client_adapter.get_session_name()
         self._workdir = workdir
+        self._gaps_strategy = gaps_strategy
 
         if in_memory or self._name == ":memory:":
             self._storage = MemoryStorage(self._name)
@@ -348,8 +350,48 @@ class TelegramSecretClient:
         raise RuntimeError("Unreachable")
 
     async def _maybe_start_rekeying(self, chat: SecretChat) -> None:
-        if (chat.key_used > 100 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
+        if (chat.key_used > 10 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
             await self.rekey(chat.id)
+
+    async def _just_send_message(
+            self,
+            chat: SecretChat,
+            message: DecryptedMessageLayer,
+            random_id: int,
+            file: InputFileA | InputFileBigA | InputExistingFileA | None,
+            file_key_fp: int | None,
+            silent: bool,
+    ) -> EncryptedFileA | None:
+        key = await self._get_or_switch_chat_key(chat)
+
+        message_to_encrypt = message.write()
+        to_encrypt = (
+                write_int(len(message_to_encrypt))
+                + message_to_encrypt
+                + urandom(randint(12, 512) // 4 * 4)
+        )
+        to_encrypt += b"\x00" * (-len(to_encrypt) % 16)
+
+        msg_key = msg_key_v2(key, to_encrypt, chat.originator)
+        aes_key, aes_iv = kdf_v2(key, msg_key, chat.originator)
+        encrypted_payload = ige256_encrypt(to_encrypt, aes_key, aes_iv)
+
+        final_payload = write_long(chat.key_fp) + msg_key + encrypted_payload
+
+        peer = InputEncryptedChatA(chat_id=chat.id, access_hash=chat.access_hash)
+        if isinstance(message.message, decrypted_message_service_clss):
+            await self._adapter.send_encrypted_service(peer, random_id, final_payload)
+        elif isinstance(message.message, decrypted_message_clss):
+            if file is not None and file_key_fp is not None:
+                return await self._adapter.send_encrypted_file(
+                    peer, random_id, final_payload, silent, file, file_key_fp,
+                )
+            else:
+                await self._adapter.send_encrypted(peer, random_id, final_payload, silent)
+        else:
+            raise ValueError(
+                f"Expected DecryptedMessage or DecryptedMessageService, got {message.message.__class__.__name__}"
+            )
 
     async def _send_message(
             self,
@@ -360,51 +402,32 @@ class TelegramSecretClient:
             file_key_fp: int | None = None,
             *,
             silent: bool = False,
-    ) -> None:
+    ) -> EncryptedFileA | None:
         chat = await self._storage.get_chat(chat_id)
         if chat.state is not ChatState.READY:
             raise SecretChatNotReadyException
 
-        key = await self._get_or_switch_chat_key(chat)
-
         await self._storage.update_chat(chat, key_used=chat.key_used + 1)
         old_out_seq = await self._storage.inc_chat_out_seq_no(chat_id)
 
-        message_to_encrypt = DecryptedMessageLayer(
+        message = DecryptedMessageLayer(
             random_bytes=urandom(randint(16, 32)),
             layer=min(chat.this_layer, max(46, chat.peer_layer)),
             in_seq_no=self._gen_in_out_seq_no(chat.in_seq_no, False, chat.originator),
             out_seq_no=self._gen_in_out_seq_no(old_out_seq, True, chat.originator),
             message=decrypted_message,
-        ).write()
-        to_encrypt = (
-            write_int(len(message_to_encrypt))
-            + message_to_encrypt
-            + urandom(randint(12, 512) // 4 * 4)
         )
-        to_encrypt += b"\x00" * (-len(to_encrypt) % 16)
 
-        msg_key = msg_key_v2(key, to_encrypt, chat.originator)
-        aes_key, aes_iv = kdf_v2(key, msg_key, chat.originator)
-        encrypted_payload = ige256_encrypt(to_encrypt, aes_key, aes_iv)
+        file_maybe = await self._just_send_message(chat, message, random_id, file, file_key_fp, silent)
+        file_id = file_maybe.id if file_maybe else None
+        file_hash = file_maybe.access_hash if file_maybe else None
 
-        final_payload = write_long(chat.key_fp) + msg_key + encrypted_payload
-
-        peer = InputEncryptedChatA(chat_id=chat_id, access_hash=chat.access_hash)
-        if isinstance(decrypted_message, decrypted_message_service_clss):
-            await self._adapter.send_encrypted_service(peer, random_id, final_payload)
-        elif isinstance(decrypted_message, decrypted_message_clss):
-            if file is not None and file_key_fp is not None:
-                # TODO: get file id and access hash to be able to download/forward file
-                await self._adapter.send_encrypted_file(peer, random_id, final_payload, silent, file, file_key_fp)
-            else:
-                await self._adapter.send_encrypted(peer, random_id, final_payload, silent)
-        else:
-            raise ValueError(
-                f"Expected DecryptedMessage or DecryptedMessageService, got {decrypted_message.__class__.__name__}"
-            )
-
+        await self._storage.store_out_message(
+            chat.id, message.out_seq_no, message.write(), file_id, file_hash, file_key_fp, silent
+        )
         await self._maybe_start_rekeying(chat)
+
+        return file_maybe
 
     @staticmethod
     def _get_file_key_fp(key: bytes, iv: bytes) -> int:
@@ -466,11 +489,15 @@ class TelegramSecretClient:
         if remote_local_out_seq_no < chat.in_seq_no:
             return
         elif remote_local_out_seq_no > chat.in_seq_no:
-            print(
-                f"detected gap in seq_no: got {obj.out_seq_no=}, "
-                f"remote has out_seq_no={remote_local_out_seq_no}, "
-                f"we have {chat.in_seq_no=}"
-            )
+            if self._gaps_strategy is GapsStrategy.IGNORE:
+                await self._storage.update_chat(chat, in_seq_no=remote_local_out_seq_no)
+            elif self._gaps_strategy is GapsStrategy.FILL:
+                ...  # TODO: actually fill gaps
+                print(
+                    f"detected gap in seq_no: got {obj.out_seq_no=}, "
+                    f"remote has out_seq_no={remote_local_out_seq_no}, "
+                    f"we have {chat.in_seq_no=}"
+                )
 
         await self._storage.update_chat(chat, key_used=chat.key_used + 1)
         await self._storage.inc_chat_in_seq_no(chat_id)
@@ -594,7 +621,26 @@ class TelegramSecretClient:
         elif isinstance(action, DecryptedMessageActionReadMessages):
             ...
         elif isinstance(action, DecryptedMessageActionResend):
-            ...
+            start = action.start_seq_no
+            end = action.end_seq_no
+            if start > end or start < 0 or end < 0:
+                return
+
+            for out_message in await self._storage.get_out_messages(chat.id, start, end):
+                message = SecretTLObject.read(BytesIO(out_message.message))
+                if not isinstance(message, DecryptedMessageLayer):
+                    continue
+
+                random_id = read_long(urandom(8))
+
+                file = InputExistingFileA(
+                    id=out_message.file_id,
+                    access_hash=out_message.file_hash,
+                ) if out_message.file_id is not None and out_message.file_hash is not None else None
+
+                await self._just_send_message(
+                    chat, message, random_id, file, out_message.file_key_fp, out_message.silent,
+                )
         elif isinstance(action, DecryptedMessageActionScreenshotMessages):
             ...
         elif isinstance(action, DecryptedMessageActionSetMessageTTL):
@@ -608,7 +654,6 @@ class TelegramSecretClient:
             self,
             chat_id: int,
             message: DecryptedMessage_8 | DecryptedMessage_17 | DecryptedMessage_45 | DecryptedMessage_73,
-            # TODO: add media in SecretMessage
             file: EncryptedFileA | None,
     ) -> None:
         if isinstance(message, (DecryptedMessage_73, DecryptedMessage_45)):
@@ -618,6 +663,20 @@ class TelegramSecretClient:
             reply_to = None
             entities = []
 
+        media = message.media if not isinstance(message.media, DecryptedMessageMediaEmpty) else None
+
+        if media is None:
+            media_has_key = False
+        else:
+            _media = cast(DecryptedMessageMediaDocument_8, media)
+            media_has_key = "key" in _media.__slots__ and "iv" in _media.__slots__
+        SecretSecurityException.check((file is not None) == media_has_key, "(file is not None) == media_has_key")
+
+        if media_has_key:
+            _media = cast(DecryptedMessageMediaDocument_8, media)
+            key_fp = self._get_file_key_fp(_media.key, _media.iv)
+            SecretSecurityException.check(file.key_fingerprint == key_fp, "file.key_fingerprint == key_fp")
+
         secret_chat = await self.get_chat(chat_id)
         new_message = SecretMessage(
             random_id=message.random_id,
@@ -626,6 +685,8 @@ class TelegramSecretClient:
             text=message.message,
             entities=entities,
             reply_to_random_id=reply_to,
+            media=media,
+            file=file,
             _client=self,
         )
 
@@ -702,7 +763,9 @@ class TelegramSecretClient:
         else:
             raise SecretLayerException("messages (?)", chat.peer_layer, 8)
 
-        await self._send_message(chat.id, request, random_id, file, file_key_fp, silent=disable_notification)
+        file_maybe = await self._send_message(
+            chat.id, request, random_id, file, file_key_fp, silent=disable_notification,
+        )
 
         return SecretMessage(
             random_id=random_id,
@@ -711,6 +774,8 @@ class TelegramSecretClient:
             text=text,
             entities=entities,
             reply_to_random_id=reply_to_random_id,
+            media=media,
+            file=file_maybe,
             _client=self,
         )
 
@@ -830,6 +895,8 @@ class TelegramSecretClient:
             chat, message, input_file, key_fp, media, entities, ttl, disable_web_page_preview, disable_notification,
             via_bot_name, reply_to_message_id,
         )
+
+    # TODO: sending photos, audios, videos, contacts
 
     async def get_chat_ids(self) -> list[int]:
         return await self._storage.get_chat_ids()

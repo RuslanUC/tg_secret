@@ -2,17 +2,18 @@ import sqlite3
 from abc import abstractmethod
 from time import time
 
-from .base_storage import BaseStorage, SecretChat, DhConfig
+from .base_storage import BaseStorage, SecretChat, DhConfig, SentMessage
 from ..enums import ChatState
 
 migrations = [
-    f"""
+    """
     CREATE TABLE `secret_version`(
         `_id` INTEGER PRIMARY KEY,
         `number` INTEGER
     );
     """,
-    f"""
+
+    """
     CREATE TABLE `dh_config`(
         `version` BIGINT PRIMARY KEY,
         `date` BIGINT NOT NULL,
@@ -20,7 +21,8 @@ migrations = [
         `g` BIGINT NOT NULL
     );
     """,
-    f"""
+
+    """
     CREATE TABLE `secret_chats`(
         `id` BIGINT PRIMARY KEY,
         `access_hash` BIGINT NOT NULL,
@@ -45,7 +47,20 @@ migrations = [
         FOREIGN KEY (`dh_config_version`) REFERENCES `dh_config`(`version`)
     );
     """,
-    # TODO: store messages (at least outgoing so they can be re-sent)
+
+    """
+    CREATE TABLE `out_messages`(
+        `id` BIGINT PRIMARY KEY,
+        `chat_id` BIGINT NOT NULL,
+        `out_seq_no` BIGINT NOT NULL,
+        `message` BLOB(4194304) NOT NULL, /* 4mb */
+        `file_id` BIGINT DEFAULT NULL,
+        `file_hash` BIGINT DEFAULT NULL,
+        `file_key_fp` BIGINT DEFAULT NULL,
+        `silent` BOOLEAN DEFAULT FALSE,
+        FOREIGN KEY (`chat_id`) REFERENCES `secret_chats`(`id`)
+    );
+    """,
 ]
 
 
@@ -145,9 +160,6 @@ class SQLiteStorage(BaseStorage):
 
         for key, value in kwargs.items():
             if key not in SecretChat.__slots__:
-                print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                print(f"Passed unknown argument \"{key}\" ({value})")
-                print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
                 continue
             fields.append(key)
             params.append(value)
@@ -203,5 +215,28 @@ class SQLiteStorage(BaseStorage):
         self.conn.execute("DELETE FROM `secret_chats` WHERE `id`=?;", (chat_id,))
 
     async def get_chat_ids(self) -> list[int]:
-        rows = self.conn.execute("SELECT `id` FROM `secret_chats`", ()).fetchall()
+        rows = self.conn.execute("SELECT `id` FROM `secret_chats`;", ()).fetchall()
         return [row[0] for row in rows]
+
+    async def store_out_message(
+            self, chat_id: int, out_seq_no: int, data: bytes, file_id: int | None, file_hash: int | None,
+            file_key_fp: int | None, silent: bool
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO `out_messages`(`chat_id`, `out_seq_no`, `message`, `file_id`, `file_hash`, `file_key_fp`, `silent`) VALUES (?, ?, ?, ?, ?, ?, ?);",
+            (chat_id, out_seq_no, data, file_id, file_hash, file_key_fp, silent,),
+        )
+
+    async def get_out_messages(self, chat_id: int, start_seq_no: int, end_seq_no: int) -> list[SentMessage]:
+        cursor = self.conn.execute(
+            "SELECT * FROM `out_messages` WHERE `chat_id`=? AND `out_seq_no` BETWEEN ? AND ?;",
+            (chat_id, start_seq_no, end_seq_no,),
+        )
+
+        rows = cursor.fetchall()
+        cols = next(zip(*cursor.description))
+
+        return [
+            SentMessage(**dict(zip(cols, row)))
+            for row in rows
+        ]

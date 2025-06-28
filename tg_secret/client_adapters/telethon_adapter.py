@@ -8,14 +8,15 @@ from telethon.tl.types import EncryptedChat, InputEncryptedChat, InputEncryptedF
     InputEncryptedFileBigUploaded, MessageEntityBold, MessageEntityItalic, MessageEntityUnderline, MessageEntityStrike, \
     MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, MessageEntitySpoiler, MessageEntityTextUrl, \
     MessageEntityCustomEmoji, UpdateEncryption, UpdateNewEncryptedMessage, EncryptedMessage, EncryptedMessageService, \
-    EncryptedFileEmpty, EncryptedFile, EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig
-from telethon.tl.types.messages import DhConfig, DhConfigNotModified
+    EncryptedFileEmpty, EncryptedFile, EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig, \
+    InputEncryptedFile
+from telethon.tl.types.messages import DhConfig, DhConfigNotModified, SentEncryptedFile
 from telethon.utils import get_attributes
 
 from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
     DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
     EncryptedMessageServiceA, EncryptedFileA, NewChatUpdateFuncT, NewChatRequestedFuncT, NewChatDiscardedFuncT, \
-    EncryptedChatRequestedA, InputFileA, InputFileBigA
+    EncryptedChatRequestedA, InputFileA, InputFileBigA, InputExistingFileA
 from tg_secret.encrypted_file_wrapper import EncryptedFileWrapper
 from tg_secret.raw.base import MessageEntity
 from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEntityItalic as SecretEntityItalic, \
@@ -136,8 +137,8 @@ class TelethonClientAdapter(SecretClientAdapter):
 
     async def send_encrypted_file(
             self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool,
-            file: InputFileA | InputFileBigA, key_fingerprint: int,
-    ) -> None:
+            file: InputFileA | InputFileBigA | InputExistingFileA, key_fingerprint: int,
+    ) -> EncryptedFileA:
         if isinstance(file, InputFileA):
             input_file = InputEncryptedFileUploaded(
                 id=file.id,
@@ -151,16 +152,38 @@ class TelethonClientAdapter(SecretClientAdapter):
                 parts=file.parts,
                 key_fingerprint=key_fingerprint,
             )
+        elif isinstance(file, InputExistingFileA):
+            input_file = InputEncryptedFile(
+                id=file.id,
+                access_hash=file.access_hash,
+            )
         else:
-            raise ValueError(f"Expected InputFileUploadedA or InputFileBigUploadedA, got {file.__class__.__name__}")
+            raise ValueError(
+                f"Expected InputFileUploadedA, or InputFileBigUploadedA, or InputExistingFileA, "
+                f"got {file.__class__.__name__}"
+            )
 
-        await self.client(SendEncryptedFileRequest(
+        sent_message: SentEncryptedFile = await self.client(SendEncryptedFileRequest(
             peer=InputEncryptedChat(chat_id=peer.chat_id, access_hash=peer.access_hash),
             random_id=random_id,
             data=data,
             file=input_file,
             silent=silent,
         ))
+
+        if not isinstance(sent_message, SentEncryptedFile):
+            raise ValueError(f"Excepted SentEncryptedFile, got {sent_message.__class__.__name__}")
+        encrypted_file = cast(EncryptedFile, sent_message.file)
+        if not isinstance(encrypted_file, EncryptedFile):
+            raise ValueError(f"Excepted EncryptedFile, got {encrypted_file.__class__.__name__}")
+
+        return EncryptedFileA(
+            id=encrypted_file.id,
+            access_hash=encrypted_file.access_hash,
+            size=encrypted_file.size,
+            dc_id=encrypted_file.dc_id,
+            key_fingerprint=encrypted_file.key_fingerprint,
+        )
 
     async def parse_entities_for_layer(
             self, text: str, layer: int, mode: ParseModeA,

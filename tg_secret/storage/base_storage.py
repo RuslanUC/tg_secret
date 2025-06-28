@@ -102,6 +102,30 @@ class EncryptionKey:
         self.exchange_id = exchange_id
 
 
+class SentMessage:
+    __slots__ = ("id", "chat_id", "out_seq_no", "message", "file_id", "file_hash", "file_key_fp", "silent", )
+
+    def __init__(
+            self,
+            id: int,
+            chat_id: int,
+            out_seq_no: int,
+            message: bytes,
+            file_id: int | None,
+            file_hash: int | None,
+            file_key_fp: int | None,
+            silent: bool,
+    ) -> None:
+        self.id = id
+        self.chat_id = chat_id
+        self.out_seq_no = out_seq_no
+        self.message = message
+        self.file_id = file_id
+        self.file_hash = file_hash
+        self.file_key_fp = file_key_fp
+        self.silent = bool(silent)
+
+
 class BaseStorage(ABC):
     @abstractmethod
     async def open(self) -> None:
@@ -179,4 +203,15 @@ class BaseStorage(ABC):
 
     @abstractmethod
     async def get_chat_ids(self) -> list[int]:
+        ...
+
+    @abstractmethod
+    async def store_out_message(
+            self, chat_id: int, out_seq_no: int, data: bytes, file_id: int | None, file_hash: int | None,
+            file_key_fp: int | None, silent: bool,
+    ) -> None:
+        ...
+
+    @abstractmethod
+    async def get_out_messages(self, chat_id: int, start_seq_no: int, end_seq_no: int) -> list[SentMessage]:
         ...

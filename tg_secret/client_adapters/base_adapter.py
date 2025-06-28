@@ -83,6 +83,12 @@ class InputFileBigA:
     parts: int
 
 
+@dataclass(slots=True)
+class InputExistingFileA:
+    id: int
+    access_hash: int
+
+
 NewEncryptedMessageFuncT = Callable[[EncryptedMessageA | EncryptedMessageServiceA, int], Awaitable[Any]]
 NewChatUpdateFuncT = Callable[[EncryptedChatA], Awaitable[Any]]
 NewChatRequestedFuncT = Callable[[EncryptedChatRequestedA], Awaitable[Any]]
@@ -115,8 +121,8 @@ class SecretClientAdapter(ABC):
     @abstractmethod
     async def send_encrypted_file(
             self, peer: InputEncryptedChatA, random_id: int, data: bytes, silent: bool,
-            file: InputFileA | InputFileBigA, key_fingerprint: int,
-    ) -> None:
+            file: InputFileA | InputFileBigA | InputExistingFileA, key_fingerprint: int,
+    ) -> EncryptedFileA:
         ...
 
     @abstractmethod

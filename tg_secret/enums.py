@@ -1,4 +1,4 @@
-from enum import Enum, auto, IntEnum
+from enum import Enum, auto, IntEnum, StrEnum
 
 
 class ChatRequestResult(Enum):
@@ -21,3 +21,21 @@ class ParseMode(Enum):
     DEFAULT = auto()
     MARKDOWN = auto()
     HTML = auto()
+
+
+class GapsStrategy(Enum):
+    # Ignore gaps, overwrite in_seq_no with received out_seq_no
+    IGNORE = auto()
+    # Request missed messages
+    FILL = auto()
+
+
+class MessageMediaType(StrEnum):
+    PHOTO = "photo"
+    DOCUMENT = "document"
+    AUDIO = "audio"
+    CONTACT = "contact"
+    LOCATION = "location"
+    VIDEO = "video"
+    VENUE = "venue"
+    WEB_PAGE = "web_page"
