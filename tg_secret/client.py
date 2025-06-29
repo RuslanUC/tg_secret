@@ -22,7 +22,8 @@ from .enums import ChatState, ChatRequestResult, ParseMode, GapsStrategy
 from .exceptions import SecretChatNotReadyException, SecretLayerException, SecretSecurityException
 from .raw import SecretTLObject
 from .raw.all import layer
-from .raw.base import DecryptedMessageAction, MessageEntity, DecryptedMessageMedia
+from .raw.base import DecryptedMessageAction, MessageEntity, DecryptedMessageMedia, DecryptedMessage, \
+    DecryptedMessageInst
 from .raw.types import DecryptedMessageService_17, DecryptedMessageActionNotifyLayer, DecryptedMessageLayer, \
     DecryptedMessageService_8, DecryptedMessage_17, DecryptedMessage_45, DecryptedMessage_73, DecryptedMessage_8, \
     DecryptedMessageActionAbortKey, DecryptedMessageActionAcceptKey, DecryptedMessageActionCommitKey, \
@@ -37,7 +38,6 @@ from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_in
 
 # TODO: add method to request secret chat
 # TODO: logging
-# TODO: after a rekey, there is gap in in_seq_no
 
 ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
 ChatReadyFuncT = Callable[[TypesSecretChat], Awaitable[Any]]
@@ -472,7 +472,7 @@ class TelegramSecretClient:
         length = read_int(decrypted_payload)
         decrypted_payload = decrypted_payload[4:]
         # Payload type + random bytes (at least 128 bits) + layer + in_seq_no + out_seq_no + message type + padding (at least 12 bytes)
-        if length <= (4 + 128 // 8 + 4 + 4 + 4 + 4 + 12) or len(decrypted_payload) < length:
+        if length < (4 + 128 // 8 + 4 + 4 + 4 + 4 + 12) or len(decrypted_payload) < length:
             return
 
         payload = decrypted_payload[:length]
@@ -492,30 +492,64 @@ class TelegramSecretClient:
             if self._gaps_strategy is GapsStrategy.IGNORE:
                 await self._storage.update_chat(chat, in_seq_no=remote_local_out_seq_no)
             elif self._gaps_strategy is GapsStrategy.FILL:
-                ...  # TODO: actually fill gaps
-                print(
-                    f"detected gap in seq_no: got {obj.out_seq_no=}, "
-                    f"remote has out_seq_no={remote_local_out_seq_no}, "
-                    f"we have {chat.in_seq_no=}"
+                await self._storage.store_in_message(
+                    chat_id=chat.id,
+                    out_seq_no=remote_local_out_seq_no,
+                    data=obj.message.write(),
+                    file_id=file.id if file is not None else None,
+                    file_dc=file.dc_id if file is not None else None,
+                    file_size=file.size if file is not None else None,
+                    file_hash=file.access_hash if file is not None else None,
+                    file_key_fp=file.key_fingerprint if file is not None else None,
+                    is_service=is_service,
                 )
+
+                await self._send_resend_request(chat.id, chat.in_seq_no, remote_local_out_seq_no - 1)
+                return
 
         await self._storage.update_chat(chat, key_used=chat.key_used + 1)
         await self._storage.inc_chat_in_seq_no(chat_id)
+        await self._process_decrypted_message(chat, obj.message, is_service, file)
 
-        if is_service:
-            if not isinstance(obj.message, decrypted_message_service_clss):
-                raise ValueError(
-                    f"Expected DecryptedMessageService, got {obj.message.__class__.__name__}"
-                )
-            await self._handle_encrypted_service_message(chat.id, obj.message)
-        else:
-            if not isinstance(obj.message, decrypted_message_clss):
-                raise ValueError(
-                    f"Expected DecryptedMessage, got {obj.message.__class__.__name__}"
-                )
-            await self._handle_encrypted_message(chat.id, obj.message, file)
+        remote_out_seq_no = remote_local_out_seq_no + 1
+        while (in_message := await self._storage.get_and_delete_in_message(chat.id, remote_out_seq_no)) is not None:
+            new_message = SecretTLObject.read(BytesIO(in_message.message))
+            if not isinstance(new_message, DecryptedMessageInst):
+                # TODO: discard chat?
+                await self._storage.update_chat(chat, in_seq_no=remote_out_seq_no)
+                continue
+
+            file = EncryptedFileA(
+                id=in_message.file_id,
+                access_hash=in_message.file_hash,
+                size=in_message.file_size,
+                dc_id=in_message.file_dc,
+                key_fingerprint=in_message.file_key_fp,
+            ) if in_message.file_id is not None else None
+
+            await self._storage.update_chat(chat, key_used=chat.key_used + 1)
+            await self._storage.inc_chat_in_seq_no(chat_id)
+            await self._process_decrypted_message(chat, new_message, in_message.is_service, file)
+
+            remote_out_seq_no += 1
 
         await self._maybe_start_rekeying(chat)
+
+    async def _process_decrypted_message(
+            self, chat: SecretChat, message: DecryptedMessage, is_service: bool, file: EncryptedFileA,
+    ) -> None:
+        if is_service:
+            if not isinstance(message, decrypted_message_service_clss):
+                raise ValueError(
+                    f"Expected DecryptedMessageService, got {message.__class__.__name__}"
+                )
+            await self._handle_encrypted_service_message(chat.id, message)
+        else:
+            if not isinstance(message, decrypted_message_clss):
+                raise ValueError(
+                    f"Expected DecryptedMessage, got {message.__class__.__name__}"
+                )
+            await self._handle_encrypted_message(chat.id, message, file)
 
     async def _send_abort_key(self, chat_id: int, exchange_id: int) -> None:
         await self._send_service_message(chat_id, DecryptedMessageActionAbortKey(
@@ -533,6 +567,12 @@ class TelegramSecretClient:
         await self._send_service_message(chat_id, DecryptedMessageActionCommitKey(
             exchange_id=exchange_id,
             key_fingerprint=fp,
+        ))
+
+    async def _send_resend_request(self, chat_id: int, start_seq_no: int, end_seq_no: int) -> None:
+        await self._send_service_message(chat_id, DecryptedMessageActionResend(
+            start_seq_no=start_seq_no,
+            end_seq_no=end_seq_no,
         ))
 
     async def _handle_encrypted_service_message(
@@ -897,6 +937,7 @@ class TelegramSecretClient:
         )
 
     # TODO: sending photos, audios, videos, contacts
+    # TODO: downloading media
 
     async def get_chat_ids(self) -> list[int]:
         return await self._storage.get_chat_ids()

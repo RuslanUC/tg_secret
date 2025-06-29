@@ -2,7 +2,7 @@ import sqlite3
 from abc import abstractmethod
 from time import time
 
-from .base_storage import BaseStorage, SecretChat, DhConfig, SentMessage
+from .base_storage import BaseStorage, SecretChat, DhConfig, SentMessage, RecvMessage
 from ..enums import ChatState
 
 migrations = [
@@ -58,6 +58,22 @@ migrations = [
         `file_hash` BIGINT DEFAULT NULL,
         `file_key_fp` BIGINT DEFAULT NULL,
         `silent` BOOLEAN DEFAULT FALSE,
+        FOREIGN KEY (`chat_id`) REFERENCES `secret_chats`(`id`)
+    );
+    """,
+
+    """
+    CREATE TABLE `in_messages`(
+        `id` BIGINT PRIMARY KEY,
+        `chat_id` BIGINT NOT NULL,
+        `remote_out_seq_no` BIGINT NOT NULL,
+        `message` BLOB(4194304) NOT NULL, /* 4mb */
+        `file_id` BIGINT DEFAULT NULL,
+        `file_dc` BIGINT DEFAULT NULL,
+        `file_hash` BIGINT DEFAULT NULL,
+        `file_size` BIGINT DEFAULT NULL,
+        `file_key_fp` BIGINT DEFAULT NULL,
+        `is_service` BOOLEAN NOT NULL,
         FOREIGN KEY (`chat_id`) REFERENCES `secret_chats`(`id`)
     );
     """,
@@ -220,7 +236,7 @@ class SQLiteStorage(BaseStorage):
 
     async def store_out_message(
             self, chat_id: int, out_seq_no: int, data: bytes, file_id: int | None, file_hash: int | None,
-            file_key_fp: int | None, silent: bool
+            file_key_fp: int | None, silent: bool,
     ) -> None:
         self.conn.execute(
             "INSERT INTO `out_messages`(`chat_id`, `out_seq_no`, `message`, `file_id`, `file_hash`, `file_key_fp`, `silent`) VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -240,3 +256,27 @@ class SQLiteStorage(BaseStorage):
             SentMessage(**dict(zip(cols, row)))
             for row in rows
         ]
+
+    async def store_in_message(
+            self, chat_id: int, out_seq_no: int, data: bytes, file_id: int | None, file_dc: int | None,
+            file_hash: int | None, file_size: int | None, file_key_fp: int | None, is_service: bool,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO `in_messages`(`chat_id`, `remote_out_seq_no`, `message`, `file_id`, `file_dc`, `file_hash`, `file_size`, `file_key_fp`, `is_service`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            (chat_id, out_seq_no, data, file_id, file_dc, file_hash, file_size, file_key_fp, is_service,),
+        )
+
+    async def get_and_delete_in_message(self, chat_id: int, seq_no: int) -> RecvMessage | None:
+        cursor = self.conn.execute(
+            "SELECT * FROM `in_messages` WHERE `chat_id`=? AND `remote_out_seq_no`=?;",
+            (chat_id, seq_no,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        cols = next(zip(*cursor.description))
+        message = RecvMessage(**dict(zip(cols, row)))
+
+        self.conn.execute("DELETE FROM `in_messages` WHERE `id`=?;", (message.id,))
+
+        return message

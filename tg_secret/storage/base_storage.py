@@ -102,11 +102,33 @@ class EncryptionKey:
         self.exchange_id = exchange_id
 
 
-class SentMessage:
-    __slots__ = ("id", "chat_id", "out_seq_no", "message", "file_id", "file_hash", "file_key_fp", "silent", )
+class BaseMessage:
+    __slots__ = ("id", "chat_id", "message", "file_id", "file_hash", "file_key_fp",)
 
     def __init__(
             self,
+            *,
+            id: int,
+            chat_id: int,
+            message: bytes,
+            file_id: int | None,
+            file_hash: int | None,
+            file_key_fp: int | None,
+    ) -> None:
+        self.id = id
+        self.chat_id = chat_id
+        self.message = message
+        self.file_id = file_id
+        self.file_hash = file_hash
+        self.file_key_fp = file_key_fp
+
+
+class SentMessage(BaseMessage):
+    __slots__ = ("out_seq_no", "silent",)
+
+    def __init__(
+            self,
+            *,
             id: int,
             chat_id: int,
             out_seq_no: int,
@@ -116,14 +138,37 @@ class SentMessage:
             file_key_fp: int | None,
             silent: bool,
     ) -> None:
-        self.id = id
-        self.chat_id = chat_id
+        super().__init__(
+            id=id, chat_id=chat_id, message=message, file_id=file_id, file_hash=file_hash, file_key_fp=file_key_fp,
+        )
         self.out_seq_no = out_seq_no
-        self.message = message
-        self.file_id = file_id
-        self.file_hash = file_hash
-        self.file_key_fp = file_key_fp
-        self.silent = bool(silent)
+        self.silent = silent
+
+
+class RecvMessage(BaseMessage):
+    __slots__ = ("remote_out_seq_no", "file_dc", "file_size", "is_service",)
+
+    def __init__(
+            self,
+            *,
+            id: int,
+            chat_id: int,
+            remote_out_seq_no: int,
+            message: bytes,
+            file_id: int | None,
+            file_dc: int | None,
+            file_hash: int | None,
+            file_size: int | None,
+            file_key_fp: int | None,
+            is_service: bool,
+    ) -> None:
+        super().__init__(
+            id=id, chat_id=chat_id, message=message, file_id=file_id, file_hash=file_hash, file_key_fp=file_key_fp,
+        )
+        self.remote_out_seq_no = remote_out_seq_no
+        self.file_dc = file_dc
+        self.file_size = file_size
+        self.is_service = is_service
 
 
 class BaseStorage(ABC):
@@ -214,4 +259,15 @@ class BaseStorage(ABC):
 
     @abstractmethod
     async def get_out_messages(self, chat_id: int, start_seq_no: int, end_seq_no: int) -> list[SentMessage]:
+        ...
+
+    @abstractmethod
+    async def store_in_message(
+            self, chat_id: int, out_seq_no: int, data: bytes, file_id: int | None, file_dc: int | None,
+            file_hash: int | None, file_size: int | None, file_key_fp: int | None, is_service: bool,
+    ) -> None:
+        ...
+
+    @abstractmethod
+    async def get_and_delete_in_message(self, chat_id: int, seq_no: int) -> RecvMessage | None:
         ...
