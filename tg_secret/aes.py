@@ -5,7 +5,7 @@ except ImportError:
 try:
     import cryptg
 except ImportError:
-    tgcrypto = None
+    cryptg = None
 try:
     import pyaes
 except ImportError:

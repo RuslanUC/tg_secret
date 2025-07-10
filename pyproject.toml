@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tg-secret"
-version = "0.1.0"
+version = "0.1.1"
 description = "Secret chats support for Telegram (MTProto) client libraries"
 authors = ["RuslanUC <dev_ruslan_uc@protonmail.com>"]
 readme = "README.md"
@@ -19,6 +19,14 @@ classifiers = [
     "Typing :: Typed",
     "Topic :: Internet",
 ]
+packages = [
+    { include = "tg_secret", format = ["sdist", "wheel"] },
+]
+include = [
+    { path = "tg_secret/raw/**/*.py", format = "wheel" },
+    { path = "compiler", format = "sdist" },
+]
+
 
 [tool.poetry.urls]
 Homepage = "https://github.com/RuslanUC/tg_secret"
@@ -37,3 +45,7 @@ tgcrypto = "^1.2.5"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.build]
+generate-setup-file = false
+script = "build.py"
