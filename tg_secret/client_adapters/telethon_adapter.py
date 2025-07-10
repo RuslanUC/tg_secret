@@ -1,22 +1,24 @@
 import warnings
 from typing import cast, BinaryIO
 
+from pyrogram.raw.functions.messages import RequestEncryption
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import GetDhConfigRequest, AcceptEncryptionRequest, DiscardEncryptionRequest, \
-    SendEncryptedRequest, SendEncryptedServiceRequest, SendEncryptedFileRequest, ReceivedQueueRequest
+    SendEncryptedRequest, SendEncryptedServiceRequest, SendEncryptedFileRequest, ReceivedQueueRequest, \
+    RequestEncryptionRequest
 from telethon.tl.types import EncryptedChat, InputEncryptedChat, InputEncryptedFileUploaded, \
     InputEncryptedFileBigUploaded, MessageEntityBold, MessageEntityItalic, MessageEntityUnderline, MessageEntityStrike, \
     MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, MessageEntitySpoiler, MessageEntityTextUrl, \
     MessageEntityCustomEmoji, UpdateEncryption, UpdateNewEncryptedMessage, EncryptedMessage, EncryptedMessageService, \
     EncryptedFileEmpty, EncryptedFile, EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig, \
-    InputEncryptedFile
+    InputEncryptedFile, InputPeerUser, EncryptedChatWaiting, InputUser
 from telethon.tl.types.messages import DhConfig, DhConfigNotModified, SentEncryptedFile
 from telethon.utils import get_attributes
 
 from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
     DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
     EncryptedMessageServiceA, EncryptedFileA, NewChatUpdateFuncT, NewChatRequestedFuncT, NewChatDiscardedFuncT, \
-    EncryptedChatRequestedA, InputFileA, InputFileBigA, InputExistingFileA
+    EncryptedChatRequestedA, InputFileA, InputFileBigA, InputExistingFileA, InputPeerUserA, EncryptedChatWaitingA
 from tg_secret.encrypted_file_wrapper import EncryptedFileWrapper
 from tg_secret.raw.base import MessageEntity
 from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEntityItalic as SecretEntityItalic, \
@@ -219,6 +221,42 @@ class TelethonClientAdapter(SecretClientAdapter):
 
     async def ack_qts(self, qts: int) -> None:
         await self.client(ReceivedQueueRequest(max_qts=qts))
+
+    async def resolve_user(self, user_id: int | str) -> InputPeerUserA | None:
+        entity = await self.client.get_input_entity(user_id)
+        if entity is None:
+            return None
+        if not isinstance(entity, InputPeerUser):
+            return None
+        return InputPeerUserA(
+            id=entity.user_id,
+            access_hash=entity.access_hash,
+        )
+
+    async def request_encryption(
+            self, peer: InputPeerUserA, random_id: int, g_a: bytes,
+    ) -> EncryptedChatWaitingA | None:
+        chat: EncryptedChatWaiting | EncryptedChatDiscarded = await self.client(RequestEncryptionRequest(
+            user_id=InputUser(user_id=peer.id, access_hash=peer.access_hash),
+            random_id=random_id,
+            g_a=g_a,
+        ))
+
+        if isinstance(chat, EncryptedChatWaiting):
+            return EncryptedChatWaitingA(
+                id=chat.id,
+                access_hash=chat.access_hash,
+                date=int(chat.date.timestamp()),
+                admin_id=chat.admin_id,
+                participant_id=chat.participant_id,
+            )
+        elif isinstance(chat, EncryptedChatDiscarded):
+            return None
+
+        raise ValueError(
+            f"Expected server to return EncryptedChatWaiting or EncryptedChatDiscarded, "
+            f"got {chat.__class__.__name__}"
+        )
 
     async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
         if isinstance(update, UpdateNewEncryptedMessage):

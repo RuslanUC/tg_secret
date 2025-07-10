@@ -8,7 +8,6 @@ It is work-in-progress and not recommended to use in production yet.
 Currently, following critical features are not implemented:
  - Media downloading
  - Some security checks (check if dh_config.p is safe prime, inconsistent seq_no in terms of parity)
- - Secret chats requesting
 
 
 ### Example with pyrogram
@@ -16,8 +15,8 @@ Currently, following critical features are not implemented:
 from asyncio import sleep
 from io import BytesIO
 
-from pyrogram import Client
-from pyrogram.types import User
+from pyrogram import Client, filters
+from pyrogram.types import User, Message
 
 from tg_secret import TelegramSecretClient, ChatRequestResult, SecretChat, SecretMessage
 from tg_secret.client_adapters.pyrogram_adapter import PyrogramClientAdapter
@@ -28,6 +27,12 @@ client = Client(
     api_hash=...,  # Your api hash
 )
 secret = TelegramSecretClient(PyrogramClientAdapter(client))
+
+
+@client.on_message(filters.private & filters.command("start_secret_chat"))
+async def on_user_requested_secret_chat(_: Client, message: Message):
+    print(f"Requesting new secret chat with {message.from_user.first_name} ({message.from_user.id})")
+    await secret.request_encryption(message.from_user.id)
 
 
 @secret.on_request

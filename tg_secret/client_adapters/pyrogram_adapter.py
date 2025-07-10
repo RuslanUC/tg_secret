@@ -1,21 +1,21 @@
 from typing import cast, BinaryIO
 
-from pyrogram import Client
+from pyrogram import Client, ContinuePropagation
 from pyrogram.enums import ParseMode
 from pyrogram.raw.functions.messages import GetDhConfig, AcceptEncryption, DiscardEncryption, SendEncryptedService, \
-    SendEncrypted, SendEncryptedFile, ReceivedQueue
+    SendEncrypted, SendEncryptedFile, ReceivedQueue, RequestEncryption
 from pyrogram.raw.types import InputEncryptedChat, EncryptedChat, MessageEntityBold, MessageEntityItalic, \
     MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote, MessageEntityCode, MessageEntityPre, \
     MessageEntitySpoiler, MessageEntityTextUrl, MessageEntityCustomEmoji, UpdateNewEncryptedMessage, \
     UpdateEncryption, EncryptedMessage, EncryptedMessageService, EncryptedFile, EncryptedFileEmpty, \
     EncryptedChatRequested, EncryptedChatDiscarded, InputFile, InputFileBig, InputEncryptedFile, \
-    InputEncryptedFileUploaded, InputEncryptedFileBigUploaded
+    InputEncryptedFileUploaded, InputEncryptedFileBigUploaded, InputPeerUser, InputUser, EncryptedChatWaiting
 from pyrogram.raw.types.messages import DhConfig, DhConfigNotModified, SentEncryptedFile
 
 from tg_secret.client_adapters.base_adapter import SecretClientAdapter, DhConfigA, \
     DhConfigNotModifiedA, EncryptedChatA, InputEncryptedChatA, ParseModeA, NewEncryptedMessageFuncT, EncryptedMessageA, \
     EncryptedMessageServiceA, EncryptedFileA, NewChatUpdateFuncT, NewChatRequestedFuncT, NewChatDiscardedFuncT, \
-    EncryptedChatRequestedA, InputFileA, InputFileBigA, InputExistingFileA
+    EncryptedChatRequestedA, InputFileA, InputFileBigA, InputExistingFileA, InputPeerUserA, EncryptedChatWaitingA
 from tg_secret.encrypted_file_wrapper import EncryptedFileWrapper
 from tg_secret.raw.base import MessageEntity
 from tg_secret.raw.types import MessageEntityBold as SecretEntityBold, MessageEntityItalic as SecretEntityItalic, \
@@ -215,10 +215,46 @@ class PyrogramClientAdapter(SecretClientAdapter):
     async def ack_qts(self, qts: int) -> None:
         await self.client.invoke(ReceivedQueue(max_qts=qts))
 
+    async def resolve_user(self, user_id: int | str) -> InputPeerUserA | None:
+        peer = await self.client.resolve_peer(user_id)
+        if peer is None:
+            return None
+        if not isinstance(peer, (InputPeerUser, InputUser)):
+            return None
+        return InputPeerUserA(
+            id=cast(InputPeerUser, peer).user_id,
+            access_hash=cast(InputPeerUser, peer).access_hash,
+        )
+
+    async def request_encryption(
+            self, peer: InputPeerUserA, random_id: int, g_a: bytes,
+    ) -> EncryptedChatWaitingA | None:
+        chat: EncryptedChatWaiting | EncryptedChatDiscarded = await self.client.invoke(RequestEncryption(
+            user_id=InputUser(user_id=peer.id, access_hash=peer.access_hash),
+            random_id=random_id,
+            g_a=g_a,
+        ))
+
+        if isinstance(chat, EncryptedChatWaiting):
+            return EncryptedChatWaitingA(
+                id=chat.id,
+                access_hash=chat.access_hash,
+                date=chat.date,
+                admin_id=chat.admin_id,
+                participant_id=chat.participant_id,
+            )
+        elif isinstance(chat, EncryptedChatDiscarded):
+            return None
+
+        raise ValueError(
+            f"Expected server to return EncryptedChatWaiting or EncryptedChatDiscarded, "
+            f"got {chat.__class__.__name__}"
+        )
+
     async def _raw_updates_handler(self, _, update: UpdateEncryption | UpdateNewEncryptedMessage, _users, _chats) -> None:
         if isinstance(update, UpdateNewEncryptedMessage):
             if self.new_message_handler is None:
-                return
+                raise ContinuePropagation()
 
             enc_message: EncryptedMessage | EncryptedMessageService = update.message
             if isinstance(enc_message, EncryptedMessage):
@@ -244,17 +280,17 @@ class PyrogramClientAdapter(SecretClientAdapter):
                     bytes=enc_message.bytes,
                 )
             else:
-                return
+                raise ContinuePropagation()
 
             return await self.new_message_handler(message, update.qts)
 
         if not isinstance(update, UpdateEncryption):
-            return
+            raise ContinuePropagation()
 
         chat = update.chat
         if isinstance(chat, EncryptedChatRequested):
             if self.chat_requested_handler is None:
-                return
+                raise ContinuePropagation()
 
             return await self.chat_requested_handler(EncryptedChatRequestedA(
                 id=chat.id,
@@ -266,12 +302,12 @@ class PyrogramClientAdapter(SecretClientAdapter):
             ))
         elif isinstance(chat, EncryptedChatDiscarded):
             if self.chat_discarded_handler is None:
-                return
+                raise ContinuePropagation()
 
             return await self.chat_discarded_handler(chat.id, chat.history_deleted)
         elif isinstance(chat, EncryptedChat):
             if self.chat_discarded_handler is None:
-                return
+                raise ContinuePropagation()
 
             chat = cast(EncryptedChat, chat)
             return await self.chat_update_handler(EncryptedChatA(
@@ -279,6 +315,8 @@ class PyrogramClientAdapter(SecretClientAdapter):
                 g_a_or_b=chat.g_a_or_b,
                 key_fingerprint=chat.key_fingerprint,
             ))
+
+        raise ContinuePropagation()
 
     def _register_raw_handler_maybe(self) -> None:
         if not self.raw_handler_set:

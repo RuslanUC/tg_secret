@@ -36,7 +36,6 @@ from .storage import MemoryStorage, FileStorage, DhConfig as SecretDhConfig, Sec
 from .types import SecretChat as TypesSecretChat, SecretMessage
 from .utils import msg_key_v2, kdf_v2, read_long, write_int, write_long, read_int
 
-# TODO: add method to request secret chat
 # TODO: logging
 
 ChatRequestFuncT = Callable[[TypesSecretChat], Awaitable[ChatRequestResult]]
@@ -161,7 +160,38 @@ class TelegramSecretClient:
         await self._adapter.ack_qts(qts)
 
     async def _on_chat_updated_handler(self, chat: EncryptedChatA) -> None:
-        ...  # TODO: mark chat as READY if local chat is WAITING
+        local_chat = await self._storage.get_chat(chat.id)
+        if local_chat.state is not ChatState.WAITING:
+            return
+
+        dh_config = await self._storage.get_dh_config(local_chat.dh_config_version)
+
+        dh_prime = int.from_bytes(dh_config.p, "big")
+        g_b = int.from_bytes(chat.g_a_or_b, "big")
+        a = int.from_bytes(local_chat.a, "big")
+        key = pow(g_b, a, dh_prime).to_bytes(2048 // 8, "big")
+        key_fingerprint = sha1(key).digest()[-8:]
+        key_fingerprint = read_long(key_fingerprint)
+
+        if key_fingerprint != chat.key_fingerprint:
+            await self.discard_chat(chat.id)
+            return
+
+        await self._storage.update_chat(
+            local_chat,
+            key=key,
+            key_fp=key_fingerprint,
+            key_used=0,
+            key_created_at=int(time()),
+            state=ChatState.READY,
+            this_layer=layer,
+        )
+
+        await self._notify_about_layer(local_chat.id)
+
+        secret_chat = await self.get_chat(local_chat.id)
+        for handler in self._on_ready_handlers:
+            self._loop.create_task(handler(secret_chat))
 
     async def _on_chat_requested_handler(self, chat: EncryptedChatRequestedA) -> None:
         await self._storage.add_chat(
@@ -482,7 +512,7 @@ class TelegramSecretClient:
 
         remote_x_out = 1 if not chat.originator else 0
         if obj.out_seq_no % 2 != remote_x_out:
-            # TODO: seq_no not consistent in terms of parity, should abort secret chat
+            await self.discard_chat(chat_id, False)
             return
 
         remote_local_out_seq_no = (obj.out_seq_no - remote_x_out) // 2
@@ -515,7 +545,6 @@ class TelegramSecretClient:
         while (in_message := await self._storage.get_and_delete_in_message(chat.id, remote_out_seq_no)) is not None:
             new_message = SecretTLObject.read(BytesIO(in_message.message))
             if not isinstance(new_message, DecryptedMessageInst):
-                # TODO: discard chat?
                 await self._storage.update_chat(chat, in_seq_no=remote_out_seq_no)
                 continue
 
@@ -955,3 +984,35 @@ class TelegramSecretClient:
             return None
 
         return TypesSecretChat._from_storage_chat(chat, self)
+
+    async def request_encryption(self, peer_id: int | str) -> TypesSecretChat | None:
+        dh = await self._get_dh_config()
+        dh_prime = int.from_bytes(dh.p, "big")
+
+        a_bytes = urandom(2048 // 8)
+        a = int.from_bytes(a_bytes, "big")
+        g_a = pow(dh.g, a, dh_prime).to_bytes(2048 // 8, "big")
+
+        peer = await self._adapter.resolve_user(peer_id)
+        if peer is None:
+            raise ValueError("Unknown user!")
+
+        chat = await self._adapter.request_encryption(peer, read_long(urandom(4)), g_a)
+        if chat is None:
+            return None
+
+        await self._storage.add_chat(
+            chat.id,
+            access_hash=chat.access_hash,
+            created_at=chat.date,
+            admin_id=chat.admin_id,
+            participant_id=chat.participant_id,
+            state=ChatState.WAITING,
+            originator=True,
+            peer_layer=46,
+            this_layer=46,
+        )
+
+        await self._storage.update_chat(chat.id, a=a_bytes)
+
+        return await self.get_chat(chat.id)

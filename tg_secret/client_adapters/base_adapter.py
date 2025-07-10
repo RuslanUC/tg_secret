@@ -71,6 +71,15 @@ class EncryptedChatRequestedA:
 
 
 @dataclass(slots=True)
+class EncryptedChatWaitingA:
+    id: int
+    access_hash: int
+    date: int
+    admin_id: int
+    participant_id: int
+
+
+@dataclass(slots=True)
 class InputFileA:
     id: int
     parts: int
@@ -85,6 +94,12 @@ class InputFileBigA:
 
 @dataclass(slots=True)
 class InputExistingFileA:
+    id: int
+    access_hash: int
+
+
+@dataclass(slots=True)
+class InputPeerUserA:
     id: int
     access_hash: int
 
@@ -141,6 +156,16 @@ class SecretClientAdapter(ABC):
 
     @abstractmethod
     async def ack_qts(self, qts: int) -> None:
+        ...
+
+    @abstractmethod
+    async def resolve_user(self, user_id: int | str) -> InputPeerUserA | None:
+        ...
+
+    @abstractmethod
+    async def request_encryption(
+            self, peer: InputPeerUserA, random_id: int, g_a: bytes,
+    ) -> EncryptedChatWaitingA | None:
         ...
 
     @abstractmethod
