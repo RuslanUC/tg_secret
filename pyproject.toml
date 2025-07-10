@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tg-secret"
-version = "0.1.1"
+version = "0.1.2"
 description = "Secret chats support for Telegram (MTProto) client libraries"
 authors = ["RuslanUC <dev_ruslan_uc@protonmail.com>"]
 readme = "README.md"
@@ -45,7 +45,3 @@ tgcrypto = "^1.2.5"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.build]
-generate-setup-file = false
-script = "build.py"
