@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tg-secret"
-version = "0.1.2"
+version = "0.1.3"
 description = "Secret chats support for Telegram (MTProto) client libraries"
 authors = ["RuslanUC <dev_ruslan_uc@protonmail.com>"]
 readme = "README.md"

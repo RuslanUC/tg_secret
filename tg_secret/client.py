@@ -57,6 +57,8 @@ class TelegramSecretClient:
             workdir: Path = Path(sys.argv[0]).parent,
             in_memory: bool = False,
             gaps_strategy: GapsStrategy = GapsStrategy.FILL,
+            rekey_threshold: int = 100,
+            force_rekey_threshold: bool = False,
     ) -> None:
         self._adapter = client_adapter
 
@@ -64,6 +66,7 @@ class TelegramSecretClient:
         self._name = session_name or client_adapter.get_session_name()
         self._workdir = workdir
         self._gaps_strategy = gaps_strategy
+        self._rekey_threshold = min(150, max(5, rekey_threshold)) if not force_rekey_threshold else rekey_threshold
 
         if in_memory or self._name == ":memory:":
             self._storage = MemoryStorage(self._name)
@@ -380,7 +383,8 @@ class TelegramSecretClient:
         raise RuntimeError("Unreachable")
 
     async def _maybe_start_rekeying(self, chat: SecretChat) -> None:
-        if (chat.key_used > 10 or (time() - chat.key_created_at) > 86400 * 7) and chat.exchange_id is None:
+        if (chat.key_used > self._rekey_threshold or (time() - chat.key_created_at) > 86400 * 7) \
+                and chat.exchange_id is None:
             await self.rekey(chat.id)
 
     async def _just_send_message(
